@@ -2,7 +2,7 @@ import { applyProductionMigrations } from './migrationStartup.js';
 
 async function start() {
   if (process.env.NODE_ENV === 'production') {
-    applyProductionMigrations();
+    await applyProductionMigrations();
     console.log(JSON.stringify({ event: 'database_migrations_completed' }));
   }
 
