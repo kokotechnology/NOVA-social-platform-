@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, type ReactNode } from 'react'
 import { getCurrentUser, loginUser, logoutUser, registerUser, type AuthUser, type RegisterInput } from '../lib/auth'
 import { authSessionReducer, initialAuthSessionState } from '../lib/authSession'
+import { AUTH_SESSION_EXPIRED_EVENT } from '../lib/session'
 
 type AuthContextValue = {
   user: AuthUser | null
@@ -37,6 +38,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refreshCurrentUser().catch(() => undefined)
   }, [refreshCurrentUser])
+
+  useEffect(() => {
+    const handleExpiredSession = () => dispatch({ type: 'logged-out' })
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, handleExpiredSession)
+    return () => window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, handleExpiredSession)
+  }, [])
 
   const login = useCallback(async (identifier: string, password: string) => {
     dispatch({ type: 'clear-error' })

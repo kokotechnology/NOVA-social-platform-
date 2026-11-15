@@ -4,6 +4,7 @@ import { applyProductionMigrations } from '../scripts/migrationStartup.js';
 const originalDatabaseUrl = process.env.DATABASE_URL;
 
 afterEach(() => {
+  vi.restoreAllMocks();
   if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
   else process.env.DATABASE_URL = originalDatabaseUrl;
 });
@@ -22,7 +23,8 @@ describe('production migration startup', () => {
       ['prisma', 'migrate', 'deploy'],
       expect.objectContaining({
         env: expect.objectContaining({ DATABASE_URL: 'postgresql://migration.example/app' }),
-        stdio: 'ignore',
+        encoding: 'utf8',
+        stdio: 'pipe',
       }),
     );
     expect(process.env.DATABASE_URL).toBe('postgresql://runtime.example/app');
@@ -43,6 +45,34 @@ describe('production migration startup', () => {
 
     expect(errorMessage).toBe('Prisma migrate deploy failed (exit code 1); application startup aborted.');
     expect(errorMessage).not.toContain(migrationUrl);
+  });
+
+  it('aborts when Prisma cannot be started', () => {
+    const run = vi.fn(() => ({ error: new Error('spawn failed'), status: null }));
+
+    expect(() => applyProductionMigrations({
+      readSecret: () => 'postgresql://migration.example/app',
+      run,
+    })).toThrow('Prisma migrate deploy failed; application startup aborted.');
+    expect(run).toHaveBeenCalledWith(
+      'npx',
+      ['prisma', 'migrate', 'deploy'],
+      expect.objectContaining({ stdio: 'pipe' }),
+    );
+  });
+
+  it('redacts database credentials from visible migration diagnostics', () => {
+    const migrationUrl = 'postgresql://private-user:private-password@migration.example/app';
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    applyProductionMigrations({
+      readSecret: () => migrationUrl,
+      run: () => ({ status: 0, stdout: `Connecting to ${migrationUrl}\n` }),
+    });
+
+    const loggedOutput = stdout.mock.calls.map(([value]) => String(value)).join('');
+    expect(loggedOutput).not.toContain('private-password');
+    expect(loggedOutput).toContain('[REDACTED]');
   });
 
   it('aborts if the migration Secret File cannot be read', () => {

@@ -5,16 +5,22 @@ import { fallbackStore, findUserById } from '../lib/fallbackStore.js';
 import { prisma, isDatabaseAvailable } from '../lib/prisma.js';
 
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  const cookieToken = req.cookies?.[env.COOKIE_NAME];
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : cookieToken;
+
+  if (!token) {
+    return res.status(401).json({ message: 'Authentication required.' });
+  }
+
+  let decoded: ReturnType<typeof verifyAccessToken>;
   try {
-    const authHeader = req.headers.authorization;
-    const cookieToken = req.cookies?.[env.COOKIE_NAME];
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : cookieToken;
+    decoded = verifyAccessToken(token);
+  } catch {
+    return res.status(401).json({ message: 'Invalid or expired token.' });
+  }
 
-    if (!token) {
-      return res.status(401).json({ message: 'Authentication required.' });
-    }
-
-    const decoded = verifyAccessToken(token);
+  try {
     const dbAvailable = await isDatabaseAvailable();
     if (dbAvailable) {
       const session = await prisma.session.findFirst({
@@ -65,8 +71,8 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 
     req.user = user;
     return next();
-  } catch {
-    return res.status(401).json({ message: 'Invalid or expired token.' });
+  } catch (error) {
+    return next(error);
   }
 }
 

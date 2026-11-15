@@ -1,5 +1,5 @@
 import { API_BASE_URL } from './api'
-import { clearStoredAccessToken, getStoredAccessToken } from './session'
+import { expireStoredAccessToken, getStoredAccessToken } from './session'
 
 type RealtimeListener = (event: MessageEvent<string>) => void
 
@@ -32,7 +32,13 @@ export function openAuthenticatedEventStream(path: string) {
         })
 
         if (response.status === 401) {
-          clearStoredAccessToken()
+          expireStoredAccessToken(token)
+          closed = true
+          return
+        }
+        if (response.status >= 400 && response.status < 500) {
+          closed = true
+          return
         }
         if (!response.ok || !response.body) {
           throw new Error(`The real-time API returned status ${response.status}.`)

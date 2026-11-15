@@ -5,6 +5,15 @@ const globalForPrisma = globalThis as typeof globalThis & {
   prisma?: PrismaClient;
 };
 
+export class DatabaseUnavailableError extends Error {
+  statusCode = 503;
+
+  constructor() {
+    super('PostgreSQL is required in production and is unavailable.');
+    this.name = 'DatabaseUnavailableError';
+  }
+}
+
 export const prisma = globalForPrisma.prisma ?? new PrismaClient({
   datasourceUrl: env.DATABASE_URL,
   log: env.NODE_ENV === 'development' ? ['query', 'warn', 'error'] : ['warn', 'error'],
@@ -24,7 +33,7 @@ export async function isDatabaseAvailable() {
     return true;
   } catch {
     if (env.NODE_ENV === 'production') {
-      throw new Error('PostgreSQL is required in production and is unavailable.');
+      throw new DatabaseUnavailableError();
     }
 
     return false;

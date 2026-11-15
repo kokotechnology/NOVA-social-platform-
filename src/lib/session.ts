@@ -1,4 +1,5 @@
 const ACCESS_TOKEN_STORAGE_KEY = 'novakoko.auth.access-token'
+export const AUTH_SESSION_EXPIRED_EVENT = 'nova:auth-session-expired'
 
 function getTokenExpiration(token: string) {
   const [, encodedPayload, signature] = token.split('.')
@@ -28,7 +29,7 @@ export function getStoredAccessToken() {
 
   const expiresAt = getTokenExpiration(token)
   if (expiresAt === null || expiresAt <= Date.now()) {
-    clearStoredAccessToken()
+    expireStoredAccessToken(token)
     return null
   }
 
@@ -37,4 +38,13 @@ export function getStoredAccessToken() {
 
 export function clearStoredAccessToken() {
   localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY)
+}
+
+export function expireStoredAccessToken(expectedToken?: string | null) {
+  if (!expectedToken || localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) !== expectedToken) return
+
+  clearStoredAccessToken()
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT))
+  }
 }

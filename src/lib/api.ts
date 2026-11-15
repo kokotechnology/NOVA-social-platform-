@@ -1,4 +1,4 @@
-import { clearStoredAccessToken, getStoredAccessToken } from './session'
+import { expireStoredAccessToken, getStoredAccessToken } from './session'
 import { Capacitor } from '@capacitor/core'
 
 const productionApiBaseUrl = 'https://nova-social-platform-api.onrender.com'
@@ -101,7 +101,30 @@ async function uploadFile(
     }
     request.onerror = () => {
       clearInactivityTimer()
-      reject(new ApiError(null, 'Unable to reach the novachat API. Your saved replay is available to retry; check your connection.', undefined, 'NETWORK_ERROR'))
+      const status = request.status || null
+      let payload: unknown
+      try {
+        payload = request.responseText ? JSON.parse(request.responseText) : undefined
+      } catch {
+        payload = undefined
+      }
+
+      if (status !== null) {
+        if (status === 401) expireStoredAccessToken(accessToken)
+        reject(new ApiError(
+          status,
+          extractErrorMessage(payload, `The novachat API returned HTTP ${status} while uploading.`),
+          payload,
+        ))
+        return
+      }
+
+      reject(new ApiError(
+        null,
+        'The upload failed before an HTTP response was received. This may be a network or browser access (CORS) issue. Your selected media is available to retry.',
+        undefined,
+        'NETWORK_ERROR',
+      ))
     }
     request.ontimeout = () => {
       clearInactivityTimer()
@@ -126,7 +149,7 @@ async function uploadFile(
         return
       }
       if (request.status < 200 || request.status >= 300) {
-        if (request.status === 401) clearStoredAccessToken()
+        if (request.status === 401) expireStoredAccessToken(accessToken)
         reject(new ApiError(request.status, extractErrorMessage(payload, `Unable to upload media (HTTP ${request.status}).`), payload))
         return
       }
@@ -396,7 +419,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
 
   if (!response.ok && !hasJsonContentType) {
     if (response.status === 401) {
-      clearStoredAccessToken()
+      expireStoredAccessToken(accessToken)
       invalidateApiReadCache()
     }
 
@@ -445,7 +468,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
 
   if (!response.ok) {
     if (response.status === 401) {
-      clearStoredAccessToken()
+      expireStoredAccessToken(accessToken)
       invalidateApiReadCache()
     }
     const fallback = response.status === 429

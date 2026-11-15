@@ -3,7 +3,7 @@ import { authSessionReducer, initialAuthSessionState } from '../src/lib/authSess
 import { apiRequest, ApiError } from '../src/lib/api'
 import { loginUser, logoutUser } from '../src/lib/auth'
 import { openAuthenticatedEventStream } from '../src/lib/eventStream'
-import { storeAccessToken } from '../src/lib/session'
+import { AUTH_SESSION_EXPIRED_EVENT, storeAccessToken } from '../src/lib/session'
 
 const storedValues = new Map<string, string>()
 const storage = {
@@ -202,6 +202,34 @@ describe('browser authentication session', () => {
       code: 'API_ERROR',
       status: 422,
     })
+  })
+
+  it('sends the persisted bearer session on Discussion Groups requests', async () => {
+    const token = createToken()
+    storeAccessToken(token)
+    fetchMock.mockResolvedValueOnce(jsonResponse({ groups: [] }))
+
+    await expect(apiRequest('/api/discussion-groups?q=gardening')).resolves.toEqual({ groups: [] })
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization')).toBe(`Bearer ${token}`)
+    expect(fetchMock.mock.calls[0][1]?.credentials).toBe('include')
+  })
+
+  it('expires the current browser session after a 401 without classifying it as a network error', async () => {
+    storeAccessToken(createToken())
+    const sessionExpired = vi.fn()
+    const eventTarget = Object.assign(new EventTarget(), { location: { pathname: '/' } })
+    vi.stubGlobal('window', eventTarget)
+    eventTarget.addEventListener(AUTH_SESSION_EXPIRED_EVENT, sessionExpired)
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'User session is invalid or expired.' }, 401))
+
+    await expect(apiRequest('/api/discussion-groups')).rejects.toMatchObject({
+      status: 401,
+      code: 'AUTH_ERROR',
+    })
+    expect(storedValues.size).toBe(0)
+    expect(sessionExpired).toHaveBeenCalledOnce()
+
+    eventTarget.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, sessionExpired)
   })
 
   it('returns parsed JSON from the shared API client', async () => {
@@ -427,6 +455,22 @@ describe('browser authentication session', () => {
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization')).toBe(`Bearer ${token}`)
     expect(fetchMock.mock.calls[0][1]?.credentials).toBe('include')
     stream.close()
+  })
+
+  it('stops reconnecting an authenticated stream after its session expires', async () => {
+    vi.useFakeTimers()
+    storeAccessToken(createToken())
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'User session is invalid or expired.' }, 401))
+    const stream = openAuthenticatedEventStream('/api/realtime')
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(storedValues.size).toBe(0)
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    stream.close()
+    vi.useRealTimers()
   })
 
   it('backs off real-time reconnects after immediately closed streams', async () => {
