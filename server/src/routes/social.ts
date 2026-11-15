@@ -12,6 +12,7 @@ import { canDeleteLiveReplayMedia } from '../lib/liveReplayPolicy.js';
 import { deleteLiveKitEgressFile, stopLiveKitEgress } from '../lib/livekitEgress.js';
 import { decryptPrivateAddress, encryptPrivateAddress } from '../lib/privateProfile.js';
 import { canViewProtectedAccounts, isProtectedAccountRole, protectedAccountRoles } from '../lib/accountVisibility.js';
+import { realtimeHub } from '../lib/realtime.js';
 
 function isSafeMediaUrl(value: string) {
   if (value === '' || mediaKeyFromUrl(value) || videoMediaKeyFromUrl(value)) return true;
@@ -63,7 +64,10 @@ const createPostSchema = z.object({
 const createStorySchema = z.object({
   text: z.string().trim().max(500).optional(),
   mediaUrl: z.string().trim().max(2000).refine((value) => value === '' || mediaKeyFromUrl(value) || isSafeMediaUrl(value) && !videoMediaKeyFromUrl(value), 'Use an HTTPS image URL or an uploaded novachat image.').optional(),
-}).refine((payload) => Boolean(payload.text || payload.mediaUrl), { message: 'A story needs text or media.' });
+  sharedPostId: z.string().min(1).max(128).optional(),
+  sharedDiscussionPostId: z.string().min(1).max(128).optional(),
+}).refine((payload) => Boolean(payload.text || payload.mediaUrl || payload.sharedPostId || payload.sharedDiscussionPostId), { message: 'A story needs text, media, or a shared post.' })
+  .refine((payload) => !(payload.sharedPostId && payload.sharedDiscussionPostId), { message: 'Share one post at a time.' });
 
 const createStatusSchema = z.object({
   text: z.string().trim().max(500).optional(),
@@ -454,6 +458,76 @@ async function serializePost(post: any, currentUserId?: string, blockedUserIds?:
     savedByCurrentUser = Boolean(currentUserId && socialStore.state.postSaves.some((save) => save.postId === post.id && save.userId === currentUserId));
   }
 
+  let sharedPost: Record<string, unknown> | null = null;
+  if (post.sharedPostId) {
+    if (dbAvailable) {
+      const shared = await prisma.post.findUnique({
+        where: { id: post.sharedPostId },
+        include: { author: { select: { id: true, name: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } } },
+      });
+      if (shared && await canViewPost(shared, currentUserId)) {
+        sharedPost = {
+          id: shared.id,
+          content: shared.content,
+          imageUrl: shared.imageUrl,
+          createdAt: shared.createdAt,
+          author: await getUserSummary(shared.author),
+        };
+      }
+    } else {
+      const shared = socialStore.state.posts.find((entry) => entry.id === post.sharedPostId);
+      if (shared && await canViewPost(shared, currentUserId)) {
+        const author = await getUserById(shared.authorId);
+        sharedPost = author ? {
+          id: shared.id,
+          content: shared.content,
+          imageUrl: shared.imageUrl,
+          createdAt: shared.createdAt,
+          author: await getUserSummary(author),
+        } : null;
+      }
+    }
+  }
+  let sharedDiscussionPost: Record<string, unknown> | null = null;
+  if (post.sharedDiscussionPostId) {
+    if (dbAvailable) {
+      const shared = await prisma.discussionGroupPost.findUnique({
+        where: { id: post.sharedDiscussionPostId },
+        include: {
+          group: { select: { id: true, name: true, avatarUrl: true, privacy: true, visibility: true, memberships: { where: currentUserId ? { userId: currentUserId } : { userId: '__anonymous__' }, select: { id: true } } } },
+          author: { select: { id: true, name: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } },
+          media: { orderBy: { position: 'asc' } },
+        },
+      });
+      if (shared?.status === 'APPROVED' && ((shared.group.privacy === 'PUBLIC' && shared.group.visibility === 'VISIBLE') || shared.group.memberships.length > 0)) {
+        sharedDiscussionPost = {
+          id: shared.id,
+          groupId: shared.groupId,
+          content: shared.content,
+          createdAt: shared.createdAt,
+          author: await getUserSummary(shared.author),
+          group: { id: shared.group.id, name: shared.group.name, avatarUrl: shared.group.avatarUrl },
+          media: shared.media.map((item) => ({ url: item.mediaUrl, type: item.mediaType })),
+        };
+      }
+    } else {
+      const shared = socialStore.state.discussionPosts.find((entry) => entry.id === post.sharedDiscussionPostId && entry.status === 'APPROVED');
+      const group = shared && socialStore.state.discussionGroups.find((entry) => entry.id === shared.groupId);
+      const isMember = Boolean(currentUserId && shared && socialStore.state.discussionMemberships.some((entry) => entry.groupId === shared.groupId && entry.userId === currentUserId));
+      if (shared && group && ((group.privacy === 'PUBLIC' && group.visibility === 'VISIBLE') || isMember)) {
+        const author = await getUserById(shared.authorId);
+        sharedDiscussionPost = {
+          id: shared.id,
+          groupId: shared.groupId,
+          content: shared.content,
+          createdAt: shared.createdAt,
+          author: author ? await getUserSummary(author) : null,
+          group: { id: group.id, name: group.name, avatarUrl: group.avatarUrl },
+          media: (shared.media ?? []).map((item: { mediaUrl: string; mediaType: string }) => ({ url: item.mediaUrl, type: item.mediaType })),
+        };
+      }
+    }
+  }
   return {
     id: post.id,
     content: post.content,
@@ -484,6 +558,9 @@ async function serializePost(post: any, currentUserId?: string, blockedUserIds?:
     currentUserReaction,
     userReaction: currentUserReaction,
     authorFollowing: currentUserId ? await isFollowing(currentUserId, post.authorId ?? post.author?.id) : false,
+    sharedPost,
+    sharedDiscussionPost,
+    sharedToUserId: post.sharedToUserId ?? null,
     ...(live ? {
       live: {
         id: live.id,
@@ -529,6 +606,13 @@ async function listTimedUpdates(req: any, res: Response, kind: 'STORY' | 'STATUS
           author: { select: { id: true, name: true, email: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } },
           views: { where: { viewerId: userId }, select: { id: true } },
           _count: { select: { views: true } },
+          sharedPost: { include: { author: { select: { id: true, name: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } } } },
+          sharedDiscussionPost: {
+            include: {
+              group: { select: { id: true, name: true, avatarUrl: true, privacy: true, visibility: true } },
+              author: { select: { id: true, name: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } },
+            },
+          },
         },
         orderBy: { createdAt: 'asc' },
         take: 100,
@@ -545,6 +629,49 @@ async function listTimedUpdates(req: any, res: Response, kind: 'STORY' | 'STATUS
     const author = databaseStory ? databaseStory.author : await getUserById(authorId);
     const views = databaseStory ? databaseStory._count.views : socialStore.state.storyViews.filter((view) => view.storyId === story.id).length;
     const viewedByMe = authorId === userId || (databaseStory ? databaseStory.views.length > 0 : socialStore.state.storyViews.some((view) => view.storyId === story.id && view.viewerId === userId));
+    let sharedPost: Record<string, unknown> | null = null;
+    if (databaseStory?.sharedPost && await canViewPost(databaseStory.sharedPost, userId)) {
+      sharedPost = {
+        id: databaseStory.sharedPost.id,
+        author: await getUserSummary(databaseStory.sharedPost.author),
+        content: databaseStory.sharedPost.content,
+      };
+    } else if (story.sharedPostId) {
+      const sourcePost = socialStore.state.posts.find((entry) => entry.id === story.sharedPostId);
+      const sourceAuthor = sourcePost && await getUserById(sourcePost.authorId);
+      if (sourcePost && sourceAuthor && sourcePost.visibility === 'PUBLIC' && await canViewPost(sourcePost, userId)) {
+        sharedPost = {
+          id: sourcePost.id,
+          author: await getUserSummary(sourceAuthor),
+          content: sourcePost.content,
+        };
+      }
+    }
+    let sharedDiscussionPost: Record<string, unknown> | null = null;
+    if (databaseStory?.sharedDiscussionPost?.status === 'APPROVED'
+      && databaseStory.sharedDiscussionPost.group.privacy === 'PUBLIC'
+      && databaseStory.sharedDiscussionPost.group.visibility === 'VISIBLE') {
+      sharedDiscussionPost = {
+        id: databaseStory.sharedDiscussionPost.id,
+        groupId: databaseStory.sharedDiscussionPost.groupId,
+        author: await getUserSummary(databaseStory.sharedDiscussionPost.author),
+        group: { id: databaseStory.sharedDiscussionPost.group.id, name: databaseStory.sharedDiscussionPost.group.name },
+        content: databaseStory.sharedDiscussionPost.content,
+      };
+    } else if (story.sharedDiscussionPostId) {
+      const sourcePost = socialStore.state.discussionPosts.find((entry) => entry.id === story.sharedDiscussionPostId && entry.status === 'APPROVED');
+      const group = sourcePost && socialStore.state.discussionGroups.find((entry) => entry.id === sourcePost.groupId);
+      const sourceAuthor = sourcePost && await getUserById(sourcePost.authorId);
+      if (sourcePost && group?.privacy === 'PUBLIC' && group.visibility === 'VISIBLE' && sourceAuthor) {
+        sharedDiscussionPost = {
+          id: sourcePost.id,
+          groupId: sourcePost.groupId,
+          author: await getUserSummary(sourceAuthor),
+          group: { id: group.id, name: group.name },
+          content: sourcePost.content,
+        };
+      }
+    }
     stories.push({
       id: story.id,
       authorId,
@@ -555,6 +682,10 @@ async function listTimedUpdates(req: any, res: Response, kind: 'STORY' | 'STATUS
       viewCount: views,
       viewedByMe,
       author: author ? await getUserSummary(author) : null,
+      sharedPostId: story.sharedPostId ?? null,
+      sharedDiscussionPostId: story.sharedDiscussionPostId ?? null,
+      sharedPost,
+      sharedDiscussionPost,
     });
   }
 
@@ -562,8 +693,36 @@ async function listTimedUpdates(req: any, res: Response, kind: 'STORY' | 'STATUS
 }
 
 async function createTimedUpdate(req: any, res: Response, kind: 'STORY' | 'STATUS', responseKey: 'story' | 'status') {
-  const payload = kind === 'STORY' ? createStorySchema.parse(req.body ?? {}) : createStatusSchema.parse(req.body ?? {});
+  const payload = kind === 'STORY'
+    ? createStorySchema.parse(req.body ?? {})
+    : { ...createStatusSchema.parse(req.body ?? {}), sharedPostId: undefined, sharedDiscussionPostId: undefined };
   const userId = req.user!.id;
+  let sharedPostId: string | null = null;
+  let sharedDiscussionPostId: string | null = null;
+  if (kind === 'STORY' && payload.sharedPostId) {
+    const sharedPost = await (await isDatabaseAvailable()
+      ? prisma.post.findUnique({ where: { id: payload.sharedPostId }, select: { id: true, authorId: true, visibility: true, moderationHiddenAt: true } })
+      : socialStore.state.posts.find((post) => post.id === payload.sharedPostId) ?? null);
+    if (!sharedPost || !await canViewPost(sharedPost, userId) || sharedPost.visibility !== 'PUBLIC') {
+      return res.status(404).json({ message: 'This post cannot be shared to a Story.' });
+    }
+    sharedPostId = sharedPost.id;
+  }
+  if (kind === 'STORY' && payload.sharedDiscussionPostId) {
+    if (await isDatabaseAvailable()) {
+      const post = await prisma.discussionGroupPost.findFirst({
+        where: { id: payload.sharedDiscussionPostId, status: 'APPROVED', group: { privacy: 'PUBLIC', visibility: 'VISIBLE' } },
+        select: { id: true },
+      });
+      if (!post) return res.status(404).json({ message: 'This group post cannot be shared to a Story.' });
+      sharedDiscussionPostId = post.id;
+    } else {
+      const post = socialStore.state.discussionPosts.find((entry) => entry.id === payload.sharedDiscussionPostId && entry.status === 'APPROVED');
+      const group = post && socialStore.state.discussionGroups.find((entry) => entry.id === post.groupId);
+      if (!post || group?.privacy !== 'PUBLIC' || group.visibility !== 'VISIBLE') return res.status(404).json({ message: 'This group post cannot be shared to a Story.' });
+      sharedDiscussionPostId = post.id;
+    }
+  }
   if (payload.mediaUrl) {
     const ownsMedia = videoMediaKeyFromUrl(payload.mediaUrl)
       ? await uploadedVideoBelongsTo(payload.mediaUrl, userId, process.env.NODE_ENV ?? 'development')
@@ -576,12 +735,21 @@ async function createTimedUpdate(req: any, res: Response, kind: 'STORY' | 'STATU
   if (moderation === 'REVIEW') return res.status(422).json({ message: `This ${kind.toLowerCase()} requires moderator review before publication.` });
 
   const now = new Date();
-  const data = { authorId: userId, kind, text, mediaUrl: payload.mediaUrl ?? null, expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000) };
+  const data = { authorId: userId, kind, text, mediaUrl: payload.mediaUrl ?? null, sharedPostId, sharedDiscussionPostId, expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000) };
   const dbAvailable = await isDatabaseAvailable();
   const story = dbAvailable
     ? await prisma.story.create({ data })
     : { id: `story_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, ...data, createdAt: now };
   if (!dbAvailable) socialStore.state.stories.push({ ...story, createdAt: story.createdAt.toISOString(), expiresAt: story.expiresAt.toISOString() });
+  if (kind === 'STORY' && sharedPostId) {
+    if (dbAvailable) await prisma.postShare.create({ data: { postId: sharedPostId, userId } });
+    else socialStore.state.postShares.push({ id: `post_share_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, postId: sharedPostId, userId, createdAt: now.toISOString() });
+  }
+  if (kind === 'STORY' && sharedDiscussionPostId) {
+    const requestId = `story-share-${story.id}`;
+    if (dbAvailable) await prisma.discussionGroupPostShare.createMany({ data: [{ postId: sharedDiscussionPostId, userId, requestId }], skipDuplicates: true });
+    else socialStore.state.discussionPostShares.push({ id: `dg_share_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, postId: sharedDiscussionPostId, userId, requestId, createdAt: now.toISOString() });
+  }
   const author = await getUserById(userId);
   return res.status(201).json({ [responseKey]: {
     ...story,
@@ -1001,6 +1169,8 @@ socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) 
     });
 
     await notifyPostMentions(payload.content, userId);
+    const allowedUserIds = (await prisma.user.findMany({ where: { status: 'ACTIVE' }, select: { id: true } })).map(({ id }) => id);
+    realtimeHub.emit('live:feed:update', { allowedUserIds });
     return res.status(201).json({ post: await serializePost(post, userId) });
   }
 
@@ -1017,14 +1187,26 @@ socialRouter.post('/posts', requireAuth, requireAccountAccess, async (req, res) 
 
   socialStore.state.posts.push(record);
   await notifyPostMentions(payload.content, userId);
+  realtimeHub.emit('live:feed:update', { allowedUserIds: fallbackStore.list().filter((user) => user.status === 'ACTIVE').map(({ id }) => id) });
   return res.status(201).json({ post: await serializePost(record, userId) });
 });
 
 socialRouter.get('/posts', async (req, res) => {
-  const limit = Number(req.query.limit ?? 10);
-  const offset = Number(req.query.offset ?? 0);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 10));
+  const offset = Math.min(10_000, Math.max(0, Number(req.query.offset) || 0));
+  const timelineId = typeof req.query.timelineId === 'string' ? req.query.timelineId.slice(0, 128) : '';
   const dbAvailable = await isDatabaseAvailable();
   const blockedUserIds = req.user ? await getBlockedUserIds(req.user.id) : [];
+  if (timelineId && await isDatabaseAvailable()) {
+    const target = await prisma.user.findUnique({ where: { id: timelineId }, select: { id: true, role: true } });
+    if (!target || (isProtectedAccountRole(target.role) && req.user?.id !== target.id && !canViewProtectedAccounts(req.user?.role))) {
+      return res.status(404).json({ message: 'Profile not found.' });
+    }
+    if (req.user && timelineId !== req.user.id) {
+      const blockStatus = await getBlockStatus(req.user.id, timelineId);
+      if (blockStatus.blockedByMe || blockStatus.blockedMe) return res.status(404).json({ message: 'Profile not found.' });
+    }
+  }
 
   if (dbAvailable) {
     const followedIds = req.user
@@ -1037,29 +1219,154 @@ socialRouter.get('/posts', async (req, res) => {
         OR: [
           { visibility: 'PUBLIC' },
           ...(req.user ? [{ authorId: req.user.id }, { visibility: 'FOLLOWERS' as const, authorId: { in: followedIds } }] : []),
+          ...(req.user ? [{ sharedToUserId: req.user.id }] : []),
+          ...(timelineId ? [
+            ...(timelineId === req.user?.id ? [{ sharedToUserId: timelineId }] : [{ sharedToUserId: timelineId, visibility: 'PUBLIC' as const }]),
+          ] : []),
         ],
       },
       orderBy: { createdAt: 'desc' },
-      skip: offset,
-      take: Number.isFinite(limit) && limit > 0 ? limit : 10,
+      take: offset + limit,
       include: { comments: true },
     });
 
     const visiblePosts = await Promise.all(posts.map(async (post) =>
       await canViewPost(post, req.user?.id) ? post : null,
     ));
-    const result = await Promise.all(visiblePosts
+    const socialPosts = await Promise.all(visiblePosts
       .filter((post): post is NonNullable<typeof post> => post !== null)
       .map((post) => serializePost(post, req.user?.id, blockedUserIds)));
-    return res.json({ posts: result });
+    const groupPosts = req.user ? await prisma.discussionGroupPost.findMany({
+      where: {
+        status: 'APPROVED',
+        group: {
+          bans: { none: { userId: req.user.id, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] } },
+          OR: [
+            { privacy: 'PUBLIC', visibility: 'VISIBLE' },
+            { memberships: { some: { userId: req.user.id } } },
+          ],
+        },
+        ...(blockedUserIds.length ? { authorId: { notIn: blockedUserIds } } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: offset + limit,
+      include: {
+        author: { select: { id: true, name: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } },
+        group: { select: { id: true, name: true, avatarUrl: true, privacy: true, visibility: true, memberships: { where: { userId: req.user.id }, select: { id: true } } } },
+        media: { orderBy: { position: 'asc' } },
+        sharedPost: { include: { author: { select: { id: true, name: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } } } },
+        sharedFrom: {
+          include: {
+            group: { select: { id: true, name: true, avatarUrl: true, privacy: true, visibility: true } },
+            author: { select: { id: true, name: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } },
+            media: { orderBy: { position: 'asc' } },
+          },
+        },
+      },
+    }) : [];
+    const groupFeedPosts = await Promise.all(groupPosts.map(async (post) => {
+      const [reactionCounts, myReaction, commentCount] = await Promise.all([
+        prisma.discussionGroupPostReaction.groupBy({ by: ['type'], where: { postId: post.id }, _count: { _all: true } }),
+        req.user ? prisma.discussionGroupPostReaction.findUnique({ where: { postId_userId: { postId: post.id, userId: req.user.id } }, select: { type: true } }) : null,
+        prisma.discussionGroupComment.count({ where: { postId: post.id } }),
+      ]);
+      const authorSummary = await getUserSummary(post.author);
+      return {
+        id: post.id,
+        content: post.content,
+        imageUrl: null,
+        createdAt: post.createdAt,
+        updatedAt: post.updatedAt,
+        visibility: 'PUBLIC',
+        author: { id: post.author.id, name: authorSummary.name, handle: authorSummary.handle, avatar: authorSummary.avatar },
+        likes: reactionCounts.filter((item) => item.type === 'LIKE').reduce((sum, item) => sum + item._count._all, 0),
+        comments: commentCount,
+        shares: await prisma.discussionGroupPostShare.count({ where: { postId: post.id } })
+          + await prisma.discussionGroupPost.count({ where: { sharedFromId: post.id, status: 'APPROVED' } }),
+        saved: 0,
+        savedByCurrentUser: false,
+        reactionCounts: Object.fromEntries(reactionCounts.map((item) => [item.type, item._count._all])),
+        currentUserReaction: myReaction?.type ?? null,
+        authorFollowing: false,
+        groupOrigin: {
+          id: post.group.id,
+          name: post.group.name,
+          avatarUrl: post.group.avatarUrl,
+          privacy: post.group.privacy,
+          visibility: post.group.visibility,
+          canInteract: post.group.memberships.length > 0,
+        },
+        groupPostType: post.type,
+        groupId: post.groupId,
+        groupMedia: post.media.map((item) => ({ url: item.mediaUrl, type: item.mediaType })),
+        groupCanInteract: post.group.memberships.length > 0,
+        sharedPost: post.sharedPost?.visibility === 'PUBLIC' && !post.sharedPost.moderationHiddenAt ? {
+          id: post.sharedPost.id,
+          content: post.sharedPost.content,
+          imageUrl: post.sharedPost.imageUrl,
+          author: await getUserSummary(post.sharedPost.author),
+        } : null,
+        sharedDiscussionPost: post.sharedFrom?.status === 'APPROVED'
+          && post.sharedFrom.group.privacy === 'PUBLIC' && post.sharedFrom.group.visibility === 'VISIBLE'
+          ? {
+            id: post.sharedFrom.id,
+            groupId: post.sharedFrom.groupId,
+            content: post.sharedFrom.content,
+            author: await getUserSummary(post.sharedFrom.author),
+            group: { id: post.sharedFrom.group.id, name: post.sharedFrom.group.name, avatarUrl: post.sharedFrom.group.avatarUrl },
+            media: post.sharedFrom.media.map((item) => ({ url: item.mediaUrl, type: item.mediaType })),
+          }
+          : null,
+      };
+    }));
+    const feedPage = [...socialPosts, ...groupFeedPosts]
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+      .slice(offset, offset + limit);
+    return res.json({ posts: feedPage });
   }
 
-  const visiblePosts = (await Promise.all(socialStore.state.posts.map(async (post) => (
+  const visiblePosts = (await Promise.all(socialStore.state.posts.filter((post) => !timelineId || !post.sharedToUserId
+    || post.sharedToUserId === timelineId && (timelineId === req.user?.id || post.visibility === 'PUBLIC')).map(async (post) => (
     await canViewPost(post, req.user?.id) ? post : null
   )))).filter((post): post is NonNullable<typeof post> => post !== null);
-  const posts = visiblePosts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(offset, offset + (Number.isFinite(limit) && limit > 0 ? limit : 10));
+  const posts = visiblePosts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, offset + limit);
   const result = await Promise.all(posts.map((post) => serializePost(post, req.user?.id, blockedUserIds)));
-  return res.json({ posts: result });
+  const groupPosts = req.user ? socialStore.state.discussionPosts.filter((post) => {
+    if (post.status !== 'APPROVED' || blockedUserIds.includes(post.authorId)) return false;
+    const group = socialStore.state.discussionGroups.find((entry) => entry.id === post.groupId);
+    if (!group || socialStore.state.discussionBans.some((ban) => ban.groupId === group.id && ban.userId === req.user!.id
+      && (!ban.expiresAt || new Date(ban.expiresAt).getTime() > Date.now()))) return false;
+    const member = socialStore.state.discussionMemberships.some((entry) => entry.groupId === group.id && entry.userId === req.user!.id);
+    return (group.privacy === 'PUBLIC' && group.visibility === 'VISIBLE') || member;
+  }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, offset + limit) : [];
+  const groupFeedPosts = await Promise.all(groupPosts.map(async (post) => {
+    const group = socialStore.state.discussionGroups.find((entry) => entry.id === post.groupId)!;
+    const author = await getUserById(post.authorId);
+    const authorSummary = author ? await getUserSummary(author) : { name: 'Unknown user', id: post.authorId, handle: 'unknown', avatar: '' };
+    const reactions = socialStore.state.discussionPostReactions.filter((entry) => entry.postId === post.id);
+    const media = socialStore.state.discussionPostMedia.filter((entry) => entry.postId === post.id).sort((a, b) => a.position - b.position);
+    return {
+      id: post.id, content: post.content, imageUrl: null, createdAt: post.createdAt, updatedAt: post.updatedAt,
+      visibility: 'PUBLIC', author: authorSummary,
+      likes: reactions.filter((entry) => entry.type === 'LIKE').length,
+      comments: socialStore.state.discussionComments.filter((entry) => entry.postId === post.id).length,
+      shares: socialStore.state.discussionPostShares.filter((entry) => entry.postId === post.id).length
+        + socialStore.state.discussionPosts.filter((entry) => entry.sharedFromId === post.id && entry.status === 'APPROVED').length,
+      saved: 0, savedByCurrentUser: false,
+      reactionCounts: Object.fromEntries(reactionTypes.map((type) => [type, reactions.filter((entry) => entry.type === type).length])),
+      currentUserReaction: reactions.find((entry) => entry.userId === req.user!.id)?.type ?? null,
+      authorFollowing: false,
+      groupOrigin: { id: group.id, name: group.name, avatarUrl: group.avatarUrl, privacy: group.privacy, visibility: group.visibility, canInteract: socialStore.state.discussionMemberships.some((entry) => entry.groupId === group.id && entry.userId === req.user!.id) },
+      groupPostType: post.type, groupId: post.groupId, groupMedia: media.map((entry) => ({ url: entry.mediaUrl, type: entry.mediaType })),
+      groupCanInteract: socialStore.state.discussionMemberships.some((entry) => entry.groupId === group.id && entry.userId === req.user!.id),
+      sharedPost: null,
+    };
+  }));
+  const feedPage = [...result, ...groupFeedPosts]
+    .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime())
+    .reverse()
+    .slice(offset, offset + limit);
+  return res.json({ posts: feedPage });
 });
 
 socialRouter.get('/posts/:id', async (req, res) => {
@@ -1217,6 +1524,7 @@ socialRouter.post('/posts/:id/share', requireAuth, requireAccountAccess, async (
   if (!post || !await canViewPost(post, userId)) {
     return res.status(404).json({ message: 'Post not found.' });
   }
+  if (post.visibility !== 'PUBLIC') return res.status(403).json({ message: 'Only public posts can be shared externally.' });
   if (dbAvailable) {
     await prisma.postShare.create({ data: { postId, userId } });
     return res.status(201).json({ shares: await prisma.postShare.count({ where: { postId } }) });
@@ -1229,6 +1537,129 @@ socialRouter.post('/posts/:id/share', requireAuth, requireAccountAccess, async (
     createdAt: new Date().toISOString(),
   });
   return res.status(201).json({ shares: socialStore.state.postShares.filter((share) => share.postId === postId).length });
+});
+
+socialRouter.get('/users/me/share-destinations', requireAuth, async (req, res) => {
+  const userId = req.user!.id;
+  if (await isDatabaseAvailable()) {
+    const friends = await prisma.follow.findMany({
+      where: {
+        followerId: userId,
+        following: { status: 'ACTIVE', followsReceived: { some: { followerId: userId } }, NOT: { blocksReceived: { some: { blockerId: userId } } } },
+        NOT: { following: { blocksGiven: { some: { blockedId: userId } } } },
+      },
+      select: { following: { select: { id: true, name: true, profile: { select: { displayName: true, avatarUrl: true } } } } },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+    return res.json({ users: friends.map(({ following }) => following) });
+  }
+  const friends = socialStore.state.follows.filter((follow) => follow.followerId === userId
+    && socialStore.state.follows.some((reverse) => reverse.followerId === follow.followingId && reverse.followingId === userId)
+    && !socialStore.state.blocks.some((block) => (block.blockerId === userId && block.blockedId === follow.followingId)
+      || (block.blockerId === follow.followingId && block.blockedId === userId)))
+    .map((follow) => {
+      const friend = fallbackStore.list().find((candidate) => candidate.id === follow.followingId);
+      return friend ? { id: friend.id, name: friend.name, profile: getProfileForUserId(friend.id) } : null;
+    }).filter(Boolean);
+  return res.json({ users: friends });
+});
+
+socialRouter.post('/posts/:id/reshare', requireAuth, requireAccountAccess, async (req, res) => {
+  const sourceId = String(req.params.id);
+  const payload = z.object({
+    commentary: z.string().trim().max(2000).default(''),
+    sharedToUserId: z.string().min(1).optional(),
+    visibility: z.enum(['PUBLIC', 'FOLLOWERS']).default('PUBLIC'),
+    requestId: z.string().uuid(),
+  }).parse(req.body ?? {});
+  const userId = req.user!.id;
+  const dbAvailable = await isDatabaseAvailable();
+  if (dbAvailable) {
+    const prior = await prisma.post.findUnique({ where: { shareRequestId: payload.requestId } });
+    if (prior) {
+      if (prior.authorId !== userId) return res.status(409).json({ message: 'This share request has already been used.' });
+      return res.status(200).json({ post: await serializePost(prior, userId), duplicate: true });
+    }
+  } else {
+    const prior = socialStore.state.posts.find((post) => post.shareRequestId === payload.requestId);
+    if (prior) {
+      if (prior.authorId !== userId) return res.status(409).json({ message: 'This share request has already been used.' });
+      return res.status(200).json({ post: await serializePost(prior, userId), duplicate: true });
+    }
+  }
+
+  let sharedPostId: string | null = null;
+  let sharedDiscussionPostId: string | null = null;
+  if (dbAvailable) {
+    const source = await prisma.post.findUnique({ where: { id: sourceId }, select: { id: true, authorId: true, visibility: true, moderationHiddenAt: true } });
+    if (source) {
+      if (source.visibility !== 'PUBLIC' || !await canViewPost(source, userId)) return res.status(404).json({ message: 'This post cannot be reshared.' });
+      sharedPostId = source.id;
+    } else {
+      const groupPost = await prisma.discussionGroupPost.findUnique({
+        where: { id: sourceId },
+        select: { id: true, authorId: true, status: true, group: { select: { privacy: true, visibility: true, bans: { where: { userId }, select: { expiresAt: true } } } } },
+      });
+      if (!groupPost || groupPost.status !== 'APPROVED' || groupPost.group.privacy !== 'PUBLIC' || groupPost.group.visibility !== 'VISIBLE'
+        || groupPost.group.bans.some((ban) => !ban.expiresAt || ban.expiresAt > new Date())) {
+        return res.status(404).json({ message: 'This group post cannot be reshared.' });
+      }
+      sharedDiscussionPostId = groupPost.id;
+    }
+  } else {
+    const source = socialStore.state.posts.find((entry) => entry.id === sourceId);
+    if (source) {
+      if (source.visibility !== 'PUBLIC' || !await canViewPost(source, userId)) return res.status(404).json({ message: 'This post cannot be reshared.' });
+      sharedPostId = source.id;
+    } else {
+      const groupPost = socialStore.state.discussionPosts.find((entry) => entry.id === sourceId);
+      const group = groupPost && socialStore.state.discussionGroups.find((entry) => entry.id === groupPost.groupId);
+      if (!groupPost || groupPost.status !== 'APPROVED' || group?.privacy !== 'PUBLIC' || group.visibility !== 'VISIBLE'
+        || socialStore.state.discussionBans.some((ban) => ban.groupId === group.id && ban.userId === userId && (!ban.expiresAt || new Date(ban.expiresAt).getTime() > Date.now()))) {
+        return res.status(404).json({ message: 'This group post cannot be reshared.' });
+      }
+      sharedDiscussionPostId = groupPost.id;
+    }
+  }
+
+  if (payload.sharedToUserId) {
+    if (payload.sharedToUserId === userId || !await isFollowing(userId, payload.sharedToUserId) || !await isFollowing(payload.sharedToUserId, userId)) {
+      return res.status(403).json({ message: 'Only an eligible friend can receive a timeline share.' });
+    }
+    const blockStatus = await getBlockStatus(userId, payload.sharedToUserId);
+    if (blockStatus.blockedByMe || blockStatus.blockedMe) return res.status(403).json({ message: 'You cannot share to this profile.' });
+  }
+  const moderation = reviewContentForSafety({ type: 'post', text: payload.commentary, userId });
+  if (moderation === 'REMOVE') return res.status(400).json({ message: 'This commentary violates NOVA Community & Safety Rules.' });
+  if (moderation === 'REVIEW') return res.status(422).json({ message: 'This commentary requires moderator review.' });
+  const record = dbAvailable
+    ? await prisma.post.create({ data: {
+      authorId: userId, content: payload.commentary, imageUrl: null, visibility: payload.visibility,
+      sharedPostId, sharedDiscussionPostId, sharedToUserId: payload.sharedToUserId ?? null, shareRequestId: payload.requestId,
+    } })
+    : {
+      id: `post_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      authorId: userId, content: payload.commentary, imageUrl: null, background: null, visibility: payload.visibility,
+      sharedPostId, sharedDiscussionPostId, sharedToUserId: payload.sharedToUserId ?? null, shareRequestId: payload.requestId,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+  if (!dbAvailable) socialStore.state.posts.push(record);
+  if (sharedPostId && dbAvailable) await prisma.postShare.createMany({ data: [{ postId: sharedPostId, userId }], skipDuplicates: true });
+  if (sharedPostId && !dbAvailable && !socialStore.state.postShares.some((share) => share.postId === sharedPostId && share.userId === userId)) {
+    socialStore.state.postShares.push({ id: `post_share_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, postId: sharedPostId, userId, createdAt: new Date().toISOString() });
+  }
+  if (sharedDiscussionPostId && dbAvailable) {
+    await prisma.discussionGroupPostShare.createMany({ data: [{ postId: sharedDiscussionPostId, userId, requestId: payload.requestId }], skipDuplicates: true });
+  }
+  if (sharedDiscussionPostId && !dbAvailable) {
+    socialStore.state.discussionPostShares.push({ id: `dg_share_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, postId: sharedDiscussionPostId, userId, requestId: payload.requestId, createdAt: new Date().toISOString() });
+  }
+  const allowedUserIds = dbAvailable
+    ? (await prisma.user.findMany({ where: { status: 'ACTIVE' }, select: { id: true } })).map(({ id }) => id)
+    : fallbackStore.list().filter((user) => user.status === 'ACTIVE').map(({ id }) => id);
+  realtimeHub.emit('live:feed:update', { allowedUserIds });
+  return res.status(201).json({ post: await serializePost(record, userId) });
 });
 
 socialRouter.delete('/posts/:id', requireAuth, async (req, res) => {

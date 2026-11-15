@@ -32,6 +32,21 @@ export type Post = {
   category?: string
   currentUserReaction?: string | null
   authorFollowing?: boolean
+  groupOrigin?: { id: string; name: string; avatarUrl?: string | null; privacy: 'PUBLIC' | 'PRIVATE'; visibility: 'VISIBLE' | 'HIDDEN'; canInteract: boolean }
+  groupId?: string
+  groupPostType?: string
+  groupMedia?: Array<{ url: string; type: string }>
+  groupCanInteract?: boolean
+  sharedToUserId?: string | null
+  sharedPost?: { id: string; content: string; imageUrl?: string | null; author: UserSummary } | null
+  sharedDiscussionPost?: {
+    id: string
+    groupId: string
+    content: string
+    author: UserSummary
+    group: { id: string; name: string; avatarUrl?: string | null }
+    media?: Array<{ url: string; type: string }>
+  } | null
   live?: {
     id: string
     title: string

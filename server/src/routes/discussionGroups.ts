@@ -7,6 +7,7 @@ import { createNotification } from '../lib/platform.js';
 import { uploadedMediaBelongsTo, uploadedVideoBelongsTo } from '../lib/mediaStorage.js';
 import env from '../config/env.js';
 import { requireActiveAccountIfAuthenticated, requireAuth } from '../middleware/auth.js';
+import { realtimeHub } from '../lib/realtime.js';
 
 const router = Router();
 router.use(requireActiveAccountIfAuthenticated);
@@ -135,6 +136,22 @@ async function addAction(groupId: string, actorId: string, action: string, targe
   return actionRecord;
 }
 
+async function emitDiscussionFeedUpdate(groupId: string, group: { privacy: string; visibility: string }) {
+  const allowedUserIds = await (async () => {
+    if (await isDatabaseAvailable()) {
+      if (group.privacy === 'PUBLIC' && group.visibility === 'VISIBLE') {
+        return (await prisma.user.findMany({ where: { status: 'ACTIVE' }, select: { id: true } })).map(({ id }) => id);
+      }
+      return (await prisma.discussionGroupMembership.findMany({ where: { groupId }, select: { userId: true } })).map(({ userId }) => userId);
+    }
+    if (group.privacy === 'PUBLIC' && group.visibility === 'VISIBLE') {
+      return fallbackStore.list().filter((user) => user.status === 'ACTIVE').map(({ id }) => id);
+    }
+    return socialStore.state.discussionMemberships.filter((member) => member.groupId === groupId).map(({ userId }) => userId);
+  })();
+  realtimeHub.emit('live:feed:update', { allowedUserIds });
+}
+
 function removeFallbackDiscussionPosts(postIds: Set<string>) {
   for (const post of socialStore.state.discussionPosts) {
     if (post.sharedFromId && postIds.has(post.sharedFromId)) post.sharedFromId = null;
@@ -218,16 +235,24 @@ async function formatPost(post: any, viewerId: string) {
       }),
     ]);
     const sharedFrom = post.sharedFrom;
+    const sharedPost = post.sharedPost;
+    const sharedDiscussionPost = sharedFrom?.group?.privacy === 'PUBLIC' && sharedFrom.group.visibility === 'VISIBLE' ? {
+      id: sharedFrom.id,
+      groupId: sharedFrom.groupId,
+      content: sharedFrom.content,
+      author: sharedFrom.author,
+      media: sharedFrom.media,
+    } : null;
     return {
       ...post,
       sharedFrom: undefined,
-      sharedPost: sharedFrom?.group?.privacy === 'PUBLIC' && sharedFrom.group.visibility === 'VISIBLE' ? {
-        id: sharedFrom.id,
-        groupId: sharedFrom.groupId,
-        content: sharedFrom.content,
-        author: sharedFrom.author,
-        media: sharedFrom.media,
-      } : null,
+      sharedPost: sharedPost?.visibility === 'PUBLIC' && !sharedPost.moderationHiddenAt ? {
+        id: sharedPost.id,
+        content: sharedPost.content,
+        imageUrl: sharedPost.imageUrl,
+        author: sharedPost.author,
+      } : sharedDiscussionPost,
+      sharedDiscussionPost,
       poll: post.poll ? {
         ...post.poll,
         myVote: post.poll.options.find((option: { votes?: Array<{ id: string }> }) => (option.votes?.length ?? 0) > 0)?.id ?? null,
@@ -239,7 +264,17 @@ async function formatPost(post: any, viewerId: string) {
     };
   }
   const sharedFrom = socialStore.state.discussionPosts.find((entry) => entry.id === post.sharedFromId);
+  const sharedPost = socialStore.state.posts.find((entry) => entry.id === post.sharedPostId);
   const sharedGroup = sharedFrom && socialStore.state.discussionGroups.find((group) => group.id === sharedFrom.groupId);
+  const sharedDiscussionPost = sharedFrom && sharedGroup?.privacy === 'PUBLIC' && sharedGroup.visibility === 'VISIBLE'
+    ? {
+      id: sharedFrom.id,
+      groupId: sharedFrom.groupId,
+      content: sharedFrom.content,
+      author: safeUserSummary(sharedFrom.authorId),
+      media: socialStore.state.discussionPostMedia.filter((entry) => entry.postId === sharedFrom.id).sort((a, b) => a.position - b.position),
+    }
+    : null;
   const media = socialStore.state.discussionPostMedia.filter((entry) => entry.postId === post.id).sort((a, b) => a.position - b.position);
   const poll = socialStore.state.discussionPolls.find((entry) => entry.postId === post.id);
   const options: Array<{ id: string; pollId: string; text: string; position: number; createdAt: string; votes: number }> = poll
@@ -255,16 +290,11 @@ async function formatPost(post: any, viewerId: string) {
   const reactions = socialStore.state.discussionPostReactions.filter((reaction) => reaction.postId === post.id);
   return {
     ...post,
+    sharedPost: sharedPost?.visibility === 'PUBLIC' && !sharedPost.moderationHiddenAt
+      ? { id: sharedPost.id, content: sharedPost.content, imageUrl: sharedPost.imageUrl, author: safeUserSummary(sharedPost.authorId) }
+      : sharedDiscussionPost,
     media,
-    sharedPost: sharedFrom && sharedGroup?.privacy === 'PUBLIC' && sharedGroup.visibility === 'VISIBLE'
-      ? {
-        id: sharedFrom.id,
-        groupId: sharedFrom.groupId,
-        content: sharedFrom.content,
-        author: safeUserSummary(sharedFrom.authorId),
-        media: socialStore.state.discussionPostMedia.filter((entry) => entry.postId === sharedFrom.id).sort((a, b) => a.position - b.position),
-      }
-      : null,
+    sharedDiscussionPost,
     poll: poll ? { ...poll, options, myVote: socialStore.state.discussionPollVotes.find((vote) => vote.userId === viewerId && options.some((option) => option.id === vote.optionId))?.optionId ?? null } : null,
     myReaction: reactions.find((reaction) => reaction.userId === viewerId)?.type ?? null,
     reactionCounts: Object.fromEntries(['LIKE', 'LOVE', 'LAUGH', 'SAD', 'ANGRY'].map((type) => [type, reactions.filter((reaction) => reaction.type === type).length])),
@@ -495,11 +525,12 @@ router.get('/discussion-groups/:id', requireAuth, async (req, res) => {
   if (!group) return res.status(404).json({ message: 'Discussion group not found.' });
   const pageSize = Math.min(30, Math.max(1, Number(req.query.limit) || 20));
   const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+  const targetPostId = typeof req.query.postId === 'string' ? req.query.postId.slice(0, 128) : '';
   const sortByNewest = req.query.sort === 'newest';
   if (await isDatabaseAvailable()) {
     const [posts, memberCount] = await Promise.all([
       prisma.discussionGroupPost.findMany({
-        where: { groupId, status: 'APPROVED' },
+        where: { groupId, status: 'APPROVED', ...(targetPostId ? { id: targetPostId } : {}) },
         include: {
           author: { select: { id: true, name: true, profile: { select: { displayName: true, avatarUrl: true } } } },
           media: { orderBy: { position: 'asc' } },
@@ -515,7 +546,7 @@ router.get('/discussion-groups/:id', requireAuth, async (req, res) => {
         orderBy: sortByNewest
           ? [{ createdAt: 'desc' }]
           : [{ isFeatured: 'desc' }, { isPinned: 'desc' }, { createdAt: 'desc' }],
-        take: pageSize + 1,
+        take: targetPostId ? 1 : pageSize + 1,
         ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
       }),
       prisma.discussionGroupMembership.count({ where: { groupId } }),
@@ -534,7 +565,7 @@ router.get('/discussion-groups/:id', requireAuth, async (req, res) => {
     });
   }
   const posts = socialStore.state.discussionPosts
-    .filter((post) => post.groupId === groupId && post.status === 'APPROVED')
+    .filter((post) => post.groupId === groupId && post.status === 'APPROVED' && (!targetPostId || post.id === targetPostId))
     .sort((a, b) => sortByNewest
       ? b.createdAt.localeCompare(a.createdAt)
       : Number(b.isFeatured) - Number(a.isFeatured) || Number(b.isPinned) - Number(a.isPinned) || b.createdAt.localeCompare(a.createdAt));
@@ -822,6 +853,7 @@ router.post('/discussion-groups/:id/posts', requireAuth, async (req, res) => {
       )));
     }
     if (post.status === 'APPROVED') await notifyDiscussionMentions(payload.content, req.user!.id, groupId);
+    if (post.status === 'APPROVED') await emitDiscussionFeedUpdate(groupId, group);
     return res.status(201).json({ post: await formatPost(post, req.user!.id) });
   }
   const now = nowIso();
@@ -842,6 +874,7 @@ router.post('/discussion-groups/:id/posts', requireAuth, async (req, res) => {
   const recipients = socialStore.state.discussionMemberships.filter((entry) => entry.groupId === groupId && entry.userId !== req.user!.id);
   await Promise.all(recipients.map((recipient) => createNotification(recipient.userId, req.user!.id, 'discussion_group_post', `${group.name} has a new post.`, { link: `/discussion-groups/${groupId}` })));
   if (post.status === 'APPROVED') await notifyDiscussionMentions(payload.content, req.user!.id, groupId);
+  if (post.status === 'APPROVED') await emitDiscussionFeedUpdate(groupId, group);
   return res.status(201).json({ post: await formatPost(post, req.user!.id) });
 });
 
@@ -880,6 +913,8 @@ router.post('/discussion-groups/:id/posts/:postId/decision', requireAuth, async 
     if (approve) {
       await createNotification(post.authorId, req.user!.id, 'discussion_group_post_approved', 'Your group post was approved.', { link: `/discussion-groups/${groupId}` });
       await notifyDiscussionMentions(post.content, post.authorId, groupId);
+      const group = await findGroup(groupId);
+      if (group) await emitDiscussionFeedUpdate(groupId, group);
     }
     await addAction(groupId, req.user!.id, approve ? 'approve_post' : 'reject_post', post.authorId, postId);
     return res.json({ post: updated });
@@ -892,6 +927,8 @@ router.post('/discussion-groups/:id/posts/:postId/decision', requireAuth, async 
   if (approve) {
     await createNotification(post.authorId, req.user!.id, 'discussion_group_post_approved', 'Your group post was approved.', { link: `/discussion-groups/${groupId}` });
     await notifyDiscussionMentions(post.content, post.authorId, groupId);
+    const group = await findGroup(groupId);
+    if (group) await emitDiscussionFeedUpdate(groupId, group);
   }
   return res.json({ post });
 });
@@ -1129,11 +1166,13 @@ router.post('/discussion-groups/:id/posts/:postId/share', requireAuth, async (re
         },
       },
     });
+
     if (postStatus === 'APPROVED') {
       const recipients = await prisma.discussionGroupMembership.findMany({ where: { groupId: targetGroupId, userId: { not: req.user!.id } }, select: { userId: true } });
       await Promise.all(recipients.map(({ userId }) => createNotification(
         userId, req.user!.id, 'discussion_group_share', `${targetGroup.name} has a shared post.`, { link: `/discussion-groups/${targetGroupId}` },
       )));
+      await emitDiscussionFeedUpdate(targetGroupId, targetGroup);
     }
     if (post.status === 'APPROVED') await notifyDiscussionMentions(content, req.user!.id, targetGroupId);
     return res.status(201).json({ post: await formatPost(post, req.user!.id) });
@@ -1150,8 +1189,83 @@ router.post('/discussion-groups/:id/posts/:postId/share', requireAuth, async (re
     await Promise.all(recipients.map((recipient) => createNotification(
       recipient.userId, req.user!.id, 'discussion_group_share', `${targetGroup.name} has a shared post.`, { link: `/discussion-groups/${targetGroupId}` },
     )));
+    await emitDiscussionFeedUpdate(targetGroupId, targetGroup);
   }
   if (post.status === 'APPROVED') await notifyDiscussionMentions(content, req.user!.id, targetGroupId);
+  return res.status(201).json({ post: await formatPost(post, req.user!.id) });
+});
+
+router.post('/discussion-groups/:id/posts/:postId/share-count', requireAuth, async (req, res) => {
+  const groupId = String(req.params.id);
+  const postId = String(req.params.postId);
+  const { requestId } = z.object({ requestId: z.string().uuid() }).parse(req.body ?? {});
+  if (await isDatabaseAvailable()) {
+    const post = await prisma.discussionGroupPost.findFirst({
+      where: { id: postId, groupId, status: 'APPROVED', group: { privacy: 'PUBLIC', visibility: 'VISIBLE' } },
+      select: { id: true },
+    });
+    if (!post) return res.status(404).json({ message: 'This group post cannot be shared externally.' });
+    await prisma.discussionGroupPostShare.createMany({ data: [{ postId, userId: req.user!.id, requestId }], skipDuplicates: true });
+    return res.json({
+      shares: await prisma.discussionGroupPostShare.count({ where: { postId } })
+        + await prisma.discussionGroupPost.count({ where: { sharedFromId: postId, status: 'APPROVED' } }),
+    });
+  }
+  const post = socialStore.state.discussionPosts.find((entry) => entry.id === postId && entry.groupId === groupId && entry.status === 'APPROVED');
+  const group = post && await findGroup(groupId);
+  if (!post || group?.privacy !== 'PUBLIC' || group.visibility !== 'VISIBLE') {
+    return res.status(404).json({ message: 'This group post cannot be shared externally.' });
+  }
+  if (!socialStore.state.discussionPostShares.some((entry) => entry.requestId === requestId)) {
+    socialStore.state.discussionPostShares.push({ id: makeId('dg_share'), postId, userId: req.user!.id, requestId, createdAt: nowIso() });
+  }
+  return res.json({
+    shares: socialStore.state.discussionPostShares.filter((entry) => entry.postId === postId).length
+      + socialStore.state.discussionPosts.filter((entry) => entry.sharedFromId === postId && entry.status === 'APPROVED').length,
+  });
+});
+
+router.post('/discussion-groups/:id/share', requireAuth, async (req, res) => {
+  const groupId = String(req.params.id);
+  const { postId, content = '' } = z.object({
+    postId: z.string().min(1).max(128),
+    content: z.string().trim().max(2000).default(''),
+  }).parse(req.body ?? {});
+  const group = await findGroup(groupId);
+  if (!group) return res.status(404).json({ message: 'Discussion group not found.' });
+  const member = await requireActiveMember(groupId, req.user!.id);
+  if (!member) return res.status(403).json({ message: 'Only active members can share posts to this group.' });
+  if (await activeBan(groupId, req.user!.id)) return res.status(403).json({ message: 'You are banned from this group.' });
+  if (member.postingRestrictedUntil && new Date(member.postingRestrictedUntil).getTime() > Date.now()) {
+    return res.status(403).json({ message: 'Your posting ability is temporarily restricted.' });
+  }
+  const db = await isDatabaseAvailable();
+  const source = db
+    ? await prisma.post.findUnique({ where: { id: postId }, select: { id: true, visibility: true, moderationHiddenAt: true } })
+    : socialStore.state.posts.find((entry) => entry.id === postId) ?? null;
+  if (!source || source.visibility !== 'PUBLIC' || source.moderationHiddenAt) {
+    return res.status(404).json({ message: 'This post cannot be shared to a group.' });
+  }
+  const status = group.postApproval && !managerRoles.includes(member.role) ? 'PENDING' : 'APPROVED';
+  if (db) {
+    const post = await prisma.discussionGroupPost.create({
+      data: { groupId, authorId: req.user!.id, type: 'TEXT', content, status, sharedPostId: source.id },
+      include: {
+        author: { select: { id: true, name: true, profile: { select: { displayName: true, avatarUrl: true } } } },
+        sharedPost: { include: { author: { select: { id: true, name: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } } } },
+        media: true,
+      },
+    });
+    if (status === 'APPROVED') await emitDiscussionFeedUpdate(groupId, group);
+    return res.status(201).json({ post: await formatPost(post, req.user!.id) });
+  }
+  const post = {
+    id: makeId('dg_post'), groupId, authorId: req.user!.id, type: 'TEXT', content, linkUrl: null, status,
+    isPinned: false, isFeatured: false, sharedFromId: null, sharedPostId: source.id,
+    createdAt: nowIso(), updatedAt: nowIso(), author: safeUserSummary(req.user!.id),
+  };
+  socialStore.state.discussionPosts.push(post);
+  if (status === 'APPROVED') await emitDiscussionFeedUpdate(groupId, group);
   return res.status(201).json({ post: await formatPost(post, req.user!.id) });
 });
 

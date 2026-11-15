@@ -25,13 +25,17 @@ export type SocialPostRecord = {
   imageUrl: string | null;
   background?: string | null;
   visibility: 'PUBLIC' | 'FOLLOWERS' | 'PRIVATE';
-  moderationHiddenAt?: string | null;
+  moderationHiddenAt?: string | Date | null;
   moderationHiddenById?: string | null;
   moderationReason?: string | null;
   communityId?: string | null;
   sourceLiveBroadcastId?: string | null;
-  createdAt: string;
-  updatedAt: string;
+  sharedPostId?: string | null;
+  sharedDiscussionPostId?: string | null;
+  sharedToUserId?: string | null;
+  shareRequestId?: string | null;
+  createdAt: string | Date;
+  updatedAt: string | Date;
 };
 
 export type StoryRecord = {
@@ -40,6 +44,8 @@ export type StoryRecord = {
   kind?: string;
   text: string | null;
   mediaUrl: string | null;
+  sharedPostId?: string | null;
+  sharedDiscussionPostId?: string | null;
   createdAt: string;
   expiresAt: string;
 };
@@ -345,6 +351,7 @@ const globalStore = globalThis as typeof globalThis & {
     discussionInvitations: DiscussionGroupInvitationStoreRecord[];
     discussionPosts: Array<Record<string, any>>;
     discussionPostMedia: Array<Record<string, any>>;
+    discussionPostShares: Array<Record<string, any>>;
     discussionComments: Array<Record<string, any>>;
     discussionPostReactions: Array<Record<string, any>>;
     discussionCommentReactions: Array<Record<string, any>>;
@@ -393,6 +400,7 @@ if (!globalStore.__novaSocialStore) {
     discussionInvitations: [],
     discussionPosts: [],
     discussionPostMedia: [],
+    discussionPostShares: [],
     discussionComments: [],
     discussionPostReactions: [],
     discussionCommentReactions: [],
@@ -451,6 +459,7 @@ export const socialStore = {
       discussionInvitations: [],
       discussionPosts: [],
       discussionPostMedia: [],
+      discussionPostShares: [],
       discussionComments: [],
       discussionPostReactions: [],
       discussionCommentReactions: [],

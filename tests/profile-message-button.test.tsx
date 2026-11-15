@@ -71,7 +71,7 @@ beforeEach(() => {
   state.blocked = false
   state.apiRequest.mockReset().mockImplementation(async (path: string, options?: RequestInit) => {
     if (path === '/api/users/target-user') return { user: profileRecord() }
-    if (path === '/api/posts?limit=100') return { posts: [] }
+    if (path === '/api/posts?limit=100&timelineId=target-user') return { posts: [] }
     if (path === '/api/conversations' && options?.method === 'POST') return { conversation: { id: 'private-chat' } }
     return {}
   })

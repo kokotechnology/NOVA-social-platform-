@@ -269,6 +269,48 @@ describe('social platform features', () => {
     expect(response.status).toBe(401);
   });
 
+  it('creates an attributed, idempotent reshare on an eligible friend timeline', async () => {
+    const alice = await request(app).post('/api/auth/register').send({
+      name: 'Timeline Alice', email: 'timeline-alice@example.com', password: 'Password123', communityRulesAccepted: true,
+    });
+    const bob = await request(app).post('/api/auth/register').send({
+      name: 'Timeline Bob', email: 'timeline-bob@example.com', password: 'Password123', communityRulesAccepted: true,
+    });
+    const stranger = await request(app).post('/api/auth/register').send({
+      name: 'Timeline Stranger', email: 'timeline-stranger@example.com', password: 'Password123', communityRulesAccepted: true,
+    });
+    const aliceLogin = await request(app).post('/api/auth/login').send({ email: 'timeline-alice@example.com', password: 'Password123' });
+    const bobLogin = await request(app).post('/api/auth/login').send({ email: 'timeline-bob@example.com', password: 'Password123' });
+    const original = await request(app).post('/api/posts').set('Cookie', getCookieHeader(aliceLogin)).send({ content: 'Original author content.' });
+    await request(app).post(`/api/users/${alice.body.user.id}/follow`).set('Cookie', getCookieHeader(bobLogin));
+    await request(app).post(`/api/users/${bob.body.user.id}/follow`).set('Cookie', getCookieHeader(aliceLogin));
+
+    const requestId = 'c3e3a9aa-ff89-40c3-8ef2-a08bebd44c55';
+    const response = await request(app).post(`/api/posts/${original.body.post.id}/reshare`)
+      .set('Cookie', getCookieHeader(bobLogin))
+      .send({ commentary: 'My note.', sharedToUserId: alice.body.user.id, requestId });
+    expect(response.status).toBe(201);
+    expect(response.body.post).toMatchObject({
+      content: 'My note.',
+      sharedToUserId: alice.body.user.id,
+      sharedPost: { id: original.body.post.id, author: { id: alice.body.user.id } },
+    });
+
+    const timeline = await request(app).get(`/api/posts?timelineId=${alice.body.user.id}`).set('Cookie', getCookieHeader(bobLogin));
+    expect(timeline.body.posts.map((post: { id: string }) => post.id)).toContain(response.body.post.id);
+
+    const duplicate = await request(app).post(`/api/posts/${original.body.post.id}/reshare`)
+      .set('Cookie', getCookieHeader(bobLogin))
+      .send({ commentary: 'My note.', sharedToUserId: alice.body.user.id, requestId });
+    expect(duplicate.status).toBe(200);
+    expect(duplicate.body.duplicate).toBe(true);
+
+    const unauthorized = await request(app).post(`/api/posts/${original.body.post.id}/reshare`)
+      .set('Cookie', getCookieHeader(bobLogin))
+      .send({ commentary: '', sharedToUserId: stranger.body.user.id, requestId: '4a699345-b7ae-453e-8578-f3859e9ee9cf' });
+    expect(unauthorized.status).toBe(403);
+  });
+
   it('user can follow another user', async () => {
     await request(app).post('/api/auth/register').send({
       name: 'Alice',

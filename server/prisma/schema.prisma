@@ -148,6 +148,7 @@ model User {
   securityAlerts           SecurityAlert[]
   sessions                 Session[]
   posts                    Post[]
+  timelineShares           Post[]                    @relation("PostTimelineShare")
   postSaves                PostSave[]
   postShares               PostShare[]
   comments                 Comment[]
@@ -208,6 +209,7 @@ model User {
   discussionInvitesSent       DiscussionGroupInvitation[]        @relation("DiscussionGroupInviter")
   discussionInvitesReceived   DiscussionGroupInvitation[]        @relation("DiscussionGroupInvitee")
   discussionPosts             DiscussionGroupPost[]              @relation("DiscussionGroupPostAuthor")
+  discussionPostShares        DiscussionGroupPostShare[]
   discussionComments          DiscussionGroupComment[]           @relation("DiscussionGroupCommentAuthor")
   discussionPostReactions     DiscussionGroupPostReaction[]
   discussionCommentReactions  DiscussionGroupCommentReaction[]
@@ -304,6 +306,10 @@ model Post {
   id          String         @id @default(cuid())
   authorId    String
   communityId String?
+  sharedPostId String?
+  sharedDiscussionPostId String?
+  sharedToUserId String?
+  shareRequestId String? @unique
   content     String
   imageUrl    String?
   background  String?
@@ -317,6 +323,12 @@ model Post {
   updatedAt   DateTime       @updatedAt
 
   author    User        @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  sharedPost Post?      @relation("PostReshares", fields: [sharedPostId], references: [id], onDelete: SetNull, map: "Post_sharedPostId_fkey")
+  reshares   Post[]     @relation("PostReshares")
+  sharedDiscussionPost DiscussionGroupPost? @relation("DiscussionPostReshares", fields: [sharedDiscussionPostId], references: [id], onDelete: SetNull, map: "Post_sharedDiscussionPostId_fkey")
+  sharedToUser User?    @relation("PostTimelineShare", fields: [sharedToUserId], references: [id], onDelete: Cascade, map: "Post_sharedToUserId_fkey")
+  discussionGroupShares DiscussionGroupPost[] @relation("DiscussionGroupPostSharedPost")
+  stories Story[]       @relation("StorySharedPost")
   community Community?  @relation(fields: [communityId], references: [id], onDelete: SetNull)
   comments  Comment[]
   reactions Reaction[]
@@ -361,6 +373,8 @@ model VideoMeasurement {
 model Story {
   id        String   @id @default(cuid())
   authorId  String
+  sharedPostId String?
+  sharedDiscussionPostId String?
   kind      String   @default("STORY")
   text      String?
   mediaUrl  String?
@@ -368,6 +382,8 @@ model Story {
   expiresAt DateTime
 
   author User        @relation("StoryAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  sharedPost Post?   @relation("StorySharedPost", fields: [sharedPostId], references: [id], onDelete: SetNull, map: "Story_sharedPostId_fkey")
+  sharedDiscussionPost DiscussionGroupPost? @relation("StorySharedDiscussionPost", fields: [sharedDiscussionPostId], references: [id], onDelete: SetNull, map: "Story_sharedDiscussionPostId_fkey")
   views  StoryView[]
 
   @@index([authorId, createdAt])
@@ -1019,6 +1035,7 @@ model DiscussionGroupPost {
   isPinned   Boolean                   @default(false)
   isFeatured Boolean                   @default(false)
   sharedFromId String?
+  sharedPostId String?
   createdAt  DateTime                  @default(now())
   updatedAt  DateTime                  @updatedAt
 
@@ -1026,6 +1043,10 @@ model DiscussionGroupPost {
   author    User                          @relation("DiscussionGroupPostAuthor", fields: [authorId], references: [id], onDelete: Cascade)
   sharedFrom DiscussionGroupPost?         @relation("DiscussionGroupPostShares", fields: [sharedFromId], references: [id], onDelete: SetNull)
   shares    DiscussionGroupPost[]         @relation("DiscussionGroupPostShares")
+  shareRecords DiscussionGroupPostShare[]
+  sharedPost Post?                       @relation("DiscussionGroupPostSharedPost", fields: [sharedPostId], references: [id], onDelete: SetNull)
+  reshares  Post[]                       @relation("DiscussionPostReshares")
+  stories   Story[]                      @relation("StorySharedDiscussionPost")
   media     DiscussionGroupPostMedia[]
   comments  DiscussionGroupComment[]
   reactions DiscussionGroupPostReaction[]
@@ -1048,6 +1069,20 @@ model DiscussionGroupPostMedia {
   post DiscussionGroupPost @relation(fields: [postId], references: [id], onDelete: Cascade)
 
   @@index([postId, position])
+}
+
+model DiscussionGroupPostShare {
+  id        String   @id @default(cuid())
+  postId    String
+  userId    String
+  requestId String   @unique
+  createdAt DateTime @default(now())
+
+  post DiscussionGroupPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([postId, createdAt])
+  @@index([userId, createdAt])
 }
 
 model DiscussionGroupComment {

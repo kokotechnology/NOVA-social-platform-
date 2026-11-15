@@ -33,6 +33,14 @@ function toPost(record: any): Post {
     savedByCurrentUser: record.savedByCurrentUser ?? false,
     visibility: record.visibility ?? 'PUBLIC',
     currentUserReaction: record.currentUserReaction ?? null,
+    groupOrigin: record.groupOrigin,
+    groupId: record.groupId,
+    groupPostType: record.groupPostType,
+    groupMedia: record.groupMedia ?? [],
+    groupCanInteract: record.groupCanInteract ?? false,
+    sharedToUserId: record.sharedToUserId ?? null,
+    sharedPost: record.sharedPost ?? null,
+    sharedDiscussionPost: record.sharedDiscussionPost ?? null,
   }
 }
 
@@ -61,11 +69,11 @@ export function ProfilePage() {
     try {
       const [userResponse, postsResponse] = await Promise.all([
         apiRequest<{ user: ProfileRecord }>(`/api/users/${encodeURIComponent(profileId)}`),
-        apiRequest<{ posts: any[] }>('/api/posts?limit=100'),
+        apiRequest<{ posts: any[] }>(`/api/posts?limit=100&timelineId=${encodeURIComponent(profileId)}`),
       ])
       if (requestId !== profileRequestId.current) return
       const nextProfile = userResponse.user
-      const nextPosts = postsResponse.posts.filter((post) => post.author.id === profileId).map(toPost)
+      const nextPosts = postsResponse.posts.filter((post) => post.author.id === profileId || post.sharedToUserId === profileId).map(toPost)
       setProfile(nextProfile)
       setPosts(nextPosts)
     } catch (loadError) {

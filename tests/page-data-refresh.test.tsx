@@ -138,7 +138,7 @@ describe('fresh page data and navigation', () => {
           },
         }
       }
-      if (path === '/api/posts?limit=100') {
+      if (path === '/api/posts?limit=100&timelineId=profile-1') {
         return {
           posts: [{
             id: 'profile-post',
@@ -161,7 +161,7 @@ describe('fresh page data and navigation', () => {
     })
 
     expect(apiMocks.apiRequest).toHaveBeenCalledWith('/api/users/profile-1')
-    expect(apiMocks.apiRequest).toHaveBeenCalledWith('/api/posts?limit=100')
+    expect(apiMocks.apiRequest).toHaveBeenCalledWith('/api/posts?limit=100&timelineId=profile-1')
     expect(host.textContent).toContain('Current profile')
     expect(host.textContent).toContain('Current profile post')
   })

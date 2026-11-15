@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, Check, ChevronDown, ImagePlus, LockKeyhole, MessageCircle, Pin, Plus, Search, Shield, ThumbsUp, Trash2, Users, X } from 'lucide-react'
 import { Avatar } from '../components/ui/Avatar'
 import { Button } from '../components/ui/Button'
@@ -93,6 +93,8 @@ function formatTime(value: string) {
 
 export function DiscussionGroupsPage() {
   const { groupId } = useParams()
+  const [searchParams] = useSearchParams()
+  const targetPostId = searchParams.get('postId')
   const navigate = useNavigate()
   const { user } = useAuth()
   const [groups, setGroups] = useState<Group[]>([])
@@ -155,9 +157,11 @@ export function DiscussionGroupsPage() {
     }
   }, [filter, query, categoryFilter])
 
-  const openGroup = useCallback(async (id: string) => {
+  const openGroup = useCallback(async (id: string, postId?: string | null) => {
     try {
-      const response = await apiRequest<{ group: Group; nextCursor: string | null }>(`/api/discussion-groups/${encodeURIComponent(id)}?sort=${postSort}`)
+      const params = new URLSearchParams({ sort: postSort })
+      if (postId) params.set('postId', postId)
+      const response = await apiRequest<{ group: Group; nextCursor: string | null }>(`/api/discussion-groups/${encodeURIComponent(id)}?${params}`)
       setSelected(response.group)
       setNextPostCursor(response.nextCursor)
       setError('')
@@ -169,8 +173,13 @@ export function DiscussionGroupsPage() {
 
   useEffect(() => { void loadGroups() }, [loadGroups])
   useEffect(() => {
-    if (groupId) void openGroup(groupId)
-  }, [groupId, openGroup])
+    if (groupId) void openGroup(groupId, targetPostId)
+  }, [groupId, targetPostId, openGroup])
+
+  useEffect(() => {
+    if (!selected || !targetPostId) return
+    document.getElementById(`group-post-${targetPostId}`)?.scrollIntoView({ block: 'center' })
+  }, [selected, targetPostId])
 
   const refreshSelected = useCallback(async () => {
     await loadGroups()
@@ -821,7 +830,7 @@ export function DiscussionGroupsPage() {
                   </form>
                 ) : selected.privacy === 'PUBLIC' ? <p className="rounded-xl bg-blue-50 p-4 text-sm text-blue-800">Join this group to take part in the discussion.</p> : null}
                 {(selected.posts ?? []).map((post) => (
-                  <article key={post.id} className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                  <article id={`group-post-${post.id}`} key={post.id} className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                     <header className="flex items-start gap-3">
                       <Avatar src={resolveMediaUrl(post.author?.profile?.avatarUrl)} alt={post.author?.name ?? 'Group member'} size="sm" />
                       <div className="min-w-0 flex-1">

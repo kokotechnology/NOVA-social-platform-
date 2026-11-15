@@ -20,6 +20,10 @@ type StoryRecord = {
   viewCount: number
   viewedByMe: boolean
   author: { id: string; name: string; handle: string; avatar: string }
+  sharedPostId?: string | null
+  sharedDiscussionPostId?: string | null
+  sharedPost?: { id: string; content: string; author: { name: string } } | null
+  sharedDiscussionPost?: { id: string; groupId: string; content: string; author: { name: string }; group: { id: string; name: string } } | null
 }
 
 function toPost(record: any): Post {
@@ -38,6 +42,14 @@ function toPost(record: any): Post {
     visibility: record.visibility ?? 'PUBLIC',
     currentUserReaction: record.currentUserReaction ?? null,
     authorFollowing: record.authorFollowing ?? false,
+    groupOrigin: record.groupOrigin,
+    groupId: record.groupId,
+    groupPostType: record.groupPostType,
+    groupMedia: record.groupMedia ?? [],
+    groupCanInteract: record.groupCanInteract ?? false,
+    sharedToUserId: record.sharedToUserId ?? null,
+    sharedPost: record.sharedPost ?? null,
+    sharedDiscussionPost: record.sharedDiscussionPost ?? null,
     live: record.live,
   }
 }
@@ -48,6 +60,9 @@ export function HomePage() {
   const [posts, setPosts] = useState<Post[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMorePosts, setHasMorePosts] = useState(false)
+  const [feedOffset, setFeedOffset] = useState(0)
   const [stories, setStories] = useState<StoryRecord[]>([])
   const [storiesLoading, setStoriesLoading] = useState(true)
   const [storiesError, setStoriesError] = useState('')
@@ -65,6 +80,7 @@ export function HomePage() {
   const [storyReplyError, setStoryReplyError] = useState('')
   const [storyReplyNotice, setStoryReplyNotice] = useState('')
   const [storyViewerError, setStoryViewerError] = useState('')
+  const [storySharedPost, setStorySharedPost] = useState<{ id: string; group: boolean } | null>(null)
   const navigate = useNavigate()
 
   const loadFeed = async () => {
@@ -72,11 +88,44 @@ export function HomePage() {
     setError('')
     try {
       const response = await apiRequest<{ posts: any[] }>('/api/posts?limit=50')
-      setPosts(response.posts.map(toPost))
+      const loadedPosts = response.posts.map(toPost)
+      const requestedPostId = window.location.hash.startsWith('#post-') ? decodeURIComponent(window.location.hash.slice(6)) : ''
+      if (requestedPostId && !loadedPosts.some((post) => post.id === requestedPostId)) {
+        try {
+          const direct = await apiRequest<{ post: any }>(`/api/posts/${encodeURIComponent(requestedPostId)}`)
+          loadedPosts.push(toPost(direct.post))
+        } catch (directPostError) {
+          setError(directPostError instanceof Error ? directPostError.message : 'This post is no longer available.')
+        }
+      }
+      setPosts(loadedPosts)
+      setFeedOffset(response.posts.length)
+      setHasMorePosts(response.posts.length === 50)
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Unable to load your feed.')
     } finally {
       setLoading(false)
+    }
+
+  }
+
+  const loadMorePosts = async () => {
+    if (loadingMore || !hasMorePosts) return
+    setLoadingMore(true)
+    setError('')
+    try {
+      const response = await apiRequest<{ posts: any[] }>(`/api/posts?limit=50&offset=${feedOffset}`)
+      const next = response.posts.map(toPost)
+      setPosts((current) => {
+        const ids = new Set(current.map((post) => post.id))
+        return [...current, ...next.filter((post) => !ids.has(post.id))]
+      })
+      setFeedOffset((offset) => offset + response.posts.length)
+      setHasMorePosts(response.posts.length === 50)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load more feed posts.')
+    } finally {
+      setLoadingMore(false)
     }
   }
 
@@ -120,7 +169,7 @@ export function HomePage() {
   }
 
   const publishStory = async () => {
-    if (storyBusy || (!storyText.trim() && !storyMediaUrl.trim() && !storyImageFile)) return
+    if (storyBusy || (!storyText.trim() && !storyMediaUrl.trim() && !storyImageFile && !storySharedPost)) return
     setStoryBusy(true)
     setStoriesError('')
     try {
@@ -130,20 +179,40 @@ export function HomePage() {
       if (storyImageFile && mediaUrl !== uploadedStoryMediaUrl) setUploadedStoryMediaUrl(mediaUrl)
       const response = await apiRequest<{ story: StoryRecord }>('/api/stories', {
         method: 'POST',
-        body: JSON.stringify({ ...(storyText.trim() ? { text: storyText.trim() } : {}), ...(mediaUrl ? { mediaUrl } : {}) }),
+        body: JSON.stringify({
+          ...(storyText.trim() ? { text: storyText.trim() } : {}),
+          ...(mediaUrl ? { mediaUrl } : {}),
+          ...(storySharedPost ? storySharedPost.group ? { sharedDiscussionPostId: storySharedPost.id } : { sharedPostId: storySharedPost.id } : {}),
+        }),
       })
       setStories((current) => [...current, response.story])
       setStoryText('')
       setStoryMediaUrl('')
       setStoryImageFile(null)
       setUploadedStoryMediaUrl('')
+      setStorySharedPost(null)
       setShowStoryComposer(false)
     } catch (publishError) {
       setStoriesError(publishError instanceof Error ? publishError.message : 'Unable to publish this story.')
     } finally {
       setStoryBusy(false)
     }
+
   }
+
+  useEffect(() => {
+    const handleShareToStory = (event: Event) => {
+      const { postId, group } = (event as CustomEvent<{ postId: string; group: boolean }>).detail
+      setStorySharedPost({ id: postId, group })
+      setStoryText('')
+      setStoryMediaUrl('')
+      setStoryImageFile(null)
+      setShowStoryComposer(true)
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+    window.addEventListener('novachat:share-to-story', handleShareToStory)
+    return () => window.removeEventListener('novachat:share-to-story', handleShareToStory)
+  }, [])
 
   const openStory = useCallback(async (story: StoryRecord) => {
     setStoryViewerError('')
@@ -309,13 +378,14 @@ export function HomePage() {
           {storiesError ? <p role="alert" className="mt-2 flex items-center justify-between gap-2 text-xs text-rose-700"><span>{storiesError}</span><button type="button" onClick={refreshStories} className="shrink-0 font-semibold underline">Retry</button></p> : null}
           {!storiesLoading && !storiesError && stories.length === 0 ? <p className="mt-2 text-xs text-slate-500">No active stories from you or people you follow.</p> : null}
           {showStoryComposer ? <form onSubmit={(event) => { event.preventDefault(); void publishStory() }} className="mt-3 grid gap-2 border-t border-slate-100 pt-3 sm:grid-cols-[1fr_1fr_auto]">
+            {storySharedPost ? <div className="sm:col-span-3 flex items-center justify-between rounded-xl bg-indigo-50 px-3 py-2 text-sm text-indigo-900"><span>Sharing a post from {storySharedPost.group ? 'a Discussion Group' : 'the feed'}.</span><button type="button" onClick={() => setStorySharedPost(null)} className="font-semibold underline">Remove</button></div> : null}
             <input aria-label="Story text" value={storyText} onChange={(event) => setStoryText(event.target.value)} maxLength={500} placeholder="Share a short status" className="min-w-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" />
             <label className="min-w-0 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600">
               <span className="block">Story image (JPEG, PNG, WebP; up to 10 MB)</span>
               <input aria-label="Upload story image" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { setStoryImageFile(event.target.files?.[0] ?? null); setUploadedStoryMediaUrl(''); setStoryMediaUrl('') }} className="mt-1 block w-full text-xs" />
             </label>
             <input aria-label="Story image URL" type="url" value={storyMediaUrl} onChange={(event) => { setStoryMediaUrl(event.target.value); setStoryImageFile(null); setUploadedStoryMediaUrl('') }} placeholder="Or image URL (HTTPS)" className="min-w-0 rounded-xl border border-slate-200 px-3 py-2 text-sm" />
-            <button type="submit" disabled={storyBusy || (!storyText.trim() && !storyMediaUrl.trim() && !storyImageFile)} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{storyBusy ? 'Posting…' : 'Post status'}</button>
+            <button type="submit" disabled={storyBusy || (!storyText.trim() && !storyMediaUrl.trim() && !storyImageFile && !storySharedPost)} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{storyBusy ? 'Posting…' : 'Post status'}</button>
           </form> : null}
         </section>
 
@@ -347,6 +417,8 @@ export function HomePage() {
                 <button type="button" onClick={() => stepStory(-1)} disabled={stories.findIndex((story) => story.id === activeStory.id) <= 0} aria-label="Previous story" className="rounded-full bg-black/35 p-2 disabled:invisible"><ChevronLeft className="h-6 w-6" aria-hidden="true" /></button>
                 <div className="max-h-[55dvh] min-w-0 flex-1 overflow-y-auto text-center">
                   {activeStory.text ? <p className="whitespace-pre-wrap break-words text-lg font-medium drop-shadow sm:text-xl">{activeStory.text}</p> : null}
+                  {activeStory.sharedPostId ? <Link to={`/#post-${encodeURIComponent(activeStory.sharedPostId)}`} onClick={closeStory} className="mt-3 block rounded-2xl bg-white/15 p-3 text-left backdrop-blur"><p className="text-sm font-semibold">Shared post by {activeStory.sharedPost?.author?.name ?? 'NOVACHAT member'}</p><p className="mt-1 line-clamp-3 text-sm">{activeStory.sharedPost?.content}</p><span className="mt-2 block text-xs underline">Open original post</span></Link> : null}
+                  {activeStory.sharedDiscussionPostId && activeStory.sharedDiscussionPost ? <Link to={`/discussion-groups/${encodeURIComponent(activeStory.sharedDiscussionPost.groupId)}?postId=${encodeURIComponent(activeStory.sharedDiscussionPost.id)}`} onClick={closeStory} className="mt-3 block rounded-2xl bg-white/15 p-3 text-left backdrop-blur"><p className="text-sm font-semibold">{activeStory.sharedDiscussionPost.group.name} · {activeStory.sharedDiscussionPost.author.name}</p><p className="mt-1 line-clamp-3 text-sm">{activeStory.sharedDiscussionPost.content}</p><span className="mt-2 block text-xs underline">Open original post</span></Link> : null}
                   {activeStory.authorId === user?.id ? <p className="mt-3 text-xs text-white/80">{activeStory.viewCount} views</p> : null}
                 </div>
                 <button type="button" onClick={() => stepStory(1)} disabled={stories.findIndex((story) => story.id === activeStory.id) >= stories.length - 1} aria-label="Next story" className="rounded-full bg-black/35 p-2 disabled:invisible"><ChevronRight className="h-6 w-6" aria-hidden="true" /></button>
@@ -492,6 +564,7 @@ export function HomePage() {
                 </Fragment>
               ))}
             </div>
+            {!loading && hasMorePosts ? <div className="pt-4 text-center"><button type="button" onClick={() => void loadMorePosts()} disabled={loadingMore} className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">{loadingMore ? 'Loading…' : 'Load more posts'}</button></div> : null}
           </main>
 
           {/* Right discovery panel */}

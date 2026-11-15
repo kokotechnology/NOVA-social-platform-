@@ -76,6 +76,76 @@ describe('Discussion Groups', () => {
     expect((await request(app).get(`/api/discussion-groups/${created.body.group.id}`).set('Cookie', member.auth)).body.group.posts[0].poll.myVote).toBe(optionId);
   }, 30_000);
 
+  it('integrates public group posts into Home Feed and keeps interactions on the source post', async () => {
+    const owner = await register('FeedGroupOwner');
+    const member = await register('FeedGroupMember');
+    const group = await request(app).post('/api/discussion-groups').set('Cookie', owner.auth).send({
+      name: 'Feed Integration Group',
+    });
+    const post = await request(app).post(`/api/discussion-groups/${group.body.group.id}/posts`).set('Cookie', owner.auth).send({
+      type: 'TEXT',
+      content: 'A discussion visible in Home Feed.',
+    });
+    await request(app).post(`/api/discussion-groups/${group.body.group.id}/join`).set('Cookie', member.auth);
+
+    const feed = await request(app).get('/api/posts?limit=50').set('Cookie', member.auth);
+    const feedPost = feed.body.posts.find((entry: { id: string }) => entry.id === post.body.post.id);
+    expect(feedPost).toMatchObject({
+      id: post.body.post.id,
+      content: 'A discussion visible in Home Feed.',
+      author: { id: owner.user.id },
+      groupOrigin: { id: group.body.group.id, name: 'Feed Integration Group', canInteract: true },
+    });
+
+    const reaction = await request(app).post(`/api/discussion-groups/${group.body.group.id}/posts/${post.body.post.id}/reactions`)
+      .set('Cookie', member.auth).send({ type: 'LIKE' });
+    const comment = await request(app).post(`/api/discussion-groups/${group.body.group.id}/posts/${post.body.post.id}/comments`)
+      .set('Cookie', member.auth).send({ content: 'Comment on the original group post.' });
+    expect(reaction.status).toBe(200);
+    expect(comment.status).toBe(201);
+    const refreshedFeed = await request(app).get('/api/posts?limit=50').set('Cookie', member.auth);
+    expect(refreshedFeed.body.posts.find((entry: { id: string }) => entry.id === post.body.post.id)).toMatchObject({
+      likes: 1,
+      comments: 1,
+    });
+
+    const requestId = 'c0d3316b-600c-4bd0-9768-37eaf47c2e0a';
+    const reshare = await request(app).post(`/api/posts/${post.body.post.id}/reshare`).set('Cookie', member.auth).send({
+      commentary: 'A reshare of this group discussion.',
+      requestId,
+    });
+    expect(reshare.status).toBe(201);
+    expect(reshare.body.post).toMatchObject({
+      content: 'A reshare of this group discussion.',
+      sharedDiscussionPost: {
+        id: post.body.post.id,
+        group: { id: group.body.group.id, name: 'Feed Integration Group' },
+        author: { id: owner.user.id },
+      },
+    });
+    const duplicateReshare = await request(app).post(`/api/posts/${post.body.post.id}/reshare`).set('Cookie', member.auth).send({
+      commentary: 'A reshare of this group discussion.',
+      requestId,
+    });
+    expect(duplicateReshare.status).toBe(200);
+    expect(duplicateReshare.body.duplicate).toBe(true);
+
+    const story = await request(app).post('/api/stories').set('Cookie', member.auth).send({
+      sharedDiscussionPostId: post.body.post.id,
+    });
+    expect(story.status).toBe(201);
+    const stories = await request(app).get('/api/stories').set('Cookie', member.auth);
+    expect(stories.body.stories.find((entry: { id: string }) => entry.id === story.body.story.id).sharedDiscussionPost).toMatchObject({
+      id: post.body.post.id,
+      author: { id: owner.user.id },
+      group: { id: group.body.group.id },
+    });
+
+    const directLink = await request(app).get(`/api/discussion-groups/${group.body.group.id}?postId=${post.body.post.id}`)
+      .set('Cookie', member.auth);
+    expect(directLink.body.group.posts.map((entry: { id: string }) => entry.id)).toEqual([post.body.post.id]);
+  }, 20_000);
+
   it('requires private membership approval and never returns private posts to nonmembers', async () => {
     const owner = await register('PrivateOwner');
     const requester = await register('PrivateRequester');
@@ -86,11 +156,15 @@ describe('Discussion Groups', () => {
     const groupId = created.body.group.id;
     expect(created.body.group.membershipApproval).toBe(true);
     const stored = await getMediaStorage('test').putAttachment(Buffer.from('private group attachment'), 'image/png', 'png', owner.user.id);
-    await request(app).post(`/api/discussion-groups/${groupId}/posts`).set('Cookie', owner.auth).send({
+    const privatePost = await request(app).post(`/api/discussion-groups/${groupId}/posts`).set('Cookie', owner.auth).send({
       type: 'IMAGE', content: 'Members-only reading notes.', media: [{ url: stored.publicUrl, type: 'IMAGE' }],
     });
 
     expect((await request(app).get(`/api/discussion-groups/${groupId}`).set('Cookie', outsider.auth)).status).toBe(404);
+    expect((await request(app).get('/api/posts').set('Cookie', outsider.auth)).body.posts.map((post: { id: string }) => post.id)).not.toContain(privatePost.body.post.id);
+    expect((await request(app).post(`/api/posts/${privatePost.body.post.id}/reshare`)
+      .set('Cookie', outsider.auth)
+      .send({ commentary: '', requestId: 'aa5f1caa-cdbc-4482-b493-32a84bfe4a87' })).status).toBe(404);
     expect((await request(app).get(`/api/media/files/${stored.key}`).set('Cookie', outsider.auth)).status).toBe(404);
     expect((await request(app).post(`/api/discussion-groups/${groupId}/join`).set('Cookie', requester.auth)).status).toBe(202);
     expect((await request(app).get(`/api/discussion-groups/${groupId}/requests`).set('Cookie', requester.auth)).status).toBe(403);

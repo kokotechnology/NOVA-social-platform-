@@ -135,7 +135,7 @@ router.get('/communities/:id', requireAuth, async (req, res) => {
   const blocked = new Set(blockedUserIds);
   const posts = socialStore.state.posts
     .filter((post) => post.communityId === communityId && !post.moderationHiddenAt && !blocked.has(post.authorId))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   const mine = members.find((member) => member.userId === req.user!.id);
   return res.json({ community: { ...community, members, posts, joined: Boolean(mine), myRole: mine?.role ?? null, memberCount: members.length } });
 });
