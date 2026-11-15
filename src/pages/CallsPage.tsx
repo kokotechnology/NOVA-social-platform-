@@ -9,6 +9,7 @@ import { useAuth } from '../context/AuthContext'
 import { apiRequest, resolveMediaUrl } from '../lib/api'
 import { openAuthenticatedEventStream } from '../lib/eventStream'
 import { callScreenState, callViewportClassName, formatCallDuration } from '../lib/callPresentation'
+import { retryCallConnectionConfirmation } from '../lib/callConnection'
 import { cameraSwitchErrorMessage, switchToNextCamera } from '../lib/cameraSwitching'
 
 type CallParticipant = { userId: string; status: string; muted: boolean; cameraOn: boolean; speakerOn: boolean }
@@ -133,6 +134,22 @@ export function CallsPage() {
     const room = new Room({ adaptiveStream: true, dynacast: true })
     roomRef.current = room
     roomCallIdRef.current = call.id
+    let localMediaReady = false
+    let remoteMediaReady = false
+    const confirmConnection = () => {
+      if (!localMediaReady || !remoteMediaReady || confirmedCallsRef.current.has(call.id)) return
+      confirmedCallsRef.current.add(call.id)
+      void retryCallConnectionConfirmation(
+        async () => {
+          const { call: updated } = await apiRequest<{ call: CallSession }>(`/api/calls/${encodeURIComponent(call.id)}/connected`, { method: 'POST' })
+          replaceCall(updated)
+        },
+        () => roomRef.current === room,
+      ).catch((connectionError) => {
+        confirmedCallsRef.current.delete(call.id)
+        setError(connectionError instanceof Error ? connectionError.message : 'Unable to confirm the LiveKit call connection.')
+      })
+    }
     room.on(RoomEvent.AudioPlaybackStatusChanged, (playing) => setNeedsAudioPlayback(!playing))
     room.on(RoomEvent.VideoPlaybackStatusChanged, (playing) => setNeedsVideoPlayback(!playing))
     room.on(RoomEvent.TrackSubscribed, (track, _publication, participant) => {
@@ -141,14 +158,9 @@ export function CallsPage() {
         ? current
         : [...current, { key, userId: participant.identity, track }])
       const confirmsMedia = call.type === 'video' ? track.kind === Track.Kind.Video : track.kind === Track.Kind.Audio
-      if (confirmsMedia && !confirmedCallsRef.current.has(call.id)) {
-        confirmedCallsRef.current.add(call.id)
-        void apiRequest<{ call: CallSession }>(`/api/calls/${encodeURIComponent(call.id)}/connected`, { method: 'POST' })
-          .then(({ call: updated }) => replaceCall(updated))
-          .catch((connectionError) => {
-            confirmedCallsRef.current.delete(call.id)
-            setError(connectionError instanceof Error ? connectionError.message : 'Unable to confirm the LiveKit call connection.')
-          })
+      if (confirmsMedia) {
+        remoteMediaReady = true
+        confirmConnection()
       }
     })
     room.on(RoomEvent.TrackUnsubscribed, (track, _publication, participant) => {
@@ -182,6 +194,8 @@ export function CallsPage() {
       await room.connect(url, token)
       await room.localParticipant.setMicrophoneEnabled(true)
       if (call.type === 'video') await room.localParticipant.setCameraEnabled(true)
+      localMediaReady = true
+      confirmConnection()
       setMuted(false)
       setCameraOn(call.type === 'video')
       setActiveRoom(room)
