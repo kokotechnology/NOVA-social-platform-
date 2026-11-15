@@ -35,6 +35,72 @@ describe('social platform features', () => {
     vi.restoreAllMocks();
   });
 
+  it('hides staff accounts from ordinary users while preserving staff access and messaging', async () => {
+    const ordinary = await request(app).post('/api/auth/register').send({
+      name: 'Ordinary User',
+      email: 'ordinary@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+    const admin = await request(app).post('/api/auth/register').send({
+      name: 'Admin Account',
+      email: 'admin@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+    const moderator = await request(app).post('/api/auth/register').send({
+      name: 'Moderator Account',
+      email: 'moderator@example.com',
+      password: 'Password123',
+      communityRulesAccepted: true,
+    });
+    fallbackStore.updateUser(admin.body.user.id, { role: 'ADMIN' });
+    fallbackStore.updateUser(moderator.body.user.id, { role: 'MODERATOR' });
+
+    const ordinaryLogin = await request(app).post('/api/auth/login').send({ email: 'ordinary@example.com', password: 'Password123' });
+    const adminLogin = await request(app).post('/api/auth/login').send({ email: 'admin@example.com', password: 'Password123' });
+    const moderatorLogin = await request(app).post('/api/auth/login').send({ email: 'moderator@example.com', password: 'Password123' });
+    expect(adminLogin.status).toBe(200);
+    expect(moderatorLogin.status).toBe(200);
+
+    const publicDirectory = await request(app).get('/api/users');
+    const ordinaryDirectory = await request(app).get('/api/users').set('Cookie', getCookieHeader(ordinaryLogin));
+    expect(publicDirectory.body.users.map((user: { id: string }) => user.id)).not.toContain(admin.body.user.id);
+    expect(publicDirectory.body.users.map((user: { id: string }) => user.id)).not.toContain(moderator.body.user.id);
+    expect(ordinaryDirectory.body.users.map((user: { id: string }) => user.id)).not.toContain(admin.body.user.id);
+    expect(ordinaryDirectory.body.users.map((user: { id: string }) => user.id)).not.toContain(moderator.body.user.id);
+    expect((await request(app).get(`/api/users/${admin.body.user.id}`)).status).toBe(404);
+    expect((await request(app).get(`/api/users/${moderator.body.user.id}/profile`)).status).toBe(404);
+
+    for (const staffLogin of [adminLogin, moderatorLogin]) {
+      const directory = await request(app).get('/api/users').set('Cookie', getCookieHeader(staffLogin));
+      expect(directory.body.users.map((user: { id: string }) => user.id)).toContain(admin.body.user.id);
+      expect(directory.body.users.map((user: { id: string }) => user.id)).toContain(moderator.body.user.id);
+    }
+
+    expect((await request(app).post('/api/conversations').set('Cookie', getCookieHeader(ordinaryLogin)).send({ participantId: admin.body.user.id })).status).toBe(404);
+    expect((await request(app).post('/api/conversations').set('Cookie', getCookieHeader(ordinaryLogin)).send({ participantId: moderator.body.user.id })).status).toBe(404);
+    expect((await request(app).post('/api/conversations')
+      .set('Cookie', getCookieHeader(ordinaryLogin))
+      .send({ participantIds: [admin.body.user.id], isGroup: true })).status).toBe(404);
+
+    const staffConversation = await request(app).post('/api/conversations')
+      .set('Cookie', getCookieHeader(adminLogin))
+      .send({ participantId: ordinary.body.user.id });
+    expect(staffConversation.status).toBe(201);
+    const staffMessage = await request(app).post(`/api/conversations/${staffConversation.body.conversation.id}/messages`)
+      .set('Cookie', getCookieHeader(adminLogin))
+      .send({ text: 'Staff-initiated message.' });
+    expect(staffMessage.status).toBe(201);
+    expect((await request(app).post(`/api/conversations/${staffConversation.body.conversation.id}/messages`)
+      .set('Cookie', getCookieHeader(ordinaryLogin))
+      .send({ text: 'I cannot contact staff from this conversation.' })).status).toBe(403);
+    expect((await request(app).post(`/api/messages/${staffMessage.body.message.id}/forward`)
+      .set('Cookie', getCookieHeader(ordinaryLogin))
+      .send({ conversationId: staffConversation.body.conversation.id })).status).toBe(403);
+    expect((await request(app).post('/api/conversations').set('Cookie', getCookieHeader(moderatorLogin)).send({ participantId: admin.body.user.id })).status).toBe(201);
+  }, 20_000);
+
   it('does not expose a feed post when its linked live session is private', async () => {
     vi.mocked(isDatabaseAvailable).mockResolvedValue(true);
     vi.spyOn(prisma.post, 'findMany').mockResolvedValue([{

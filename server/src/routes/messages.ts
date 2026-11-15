@@ -10,6 +10,7 @@ import { findUserById } from '../lib/fallbackStore.js';
 import { createNotification } from '../lib/platform.js';
 import type { Prisma } from '@prisma/client';
 import env from '../config/env.js';
+import { canViewProtectedAccounts, isProtectedAccountRole, protectedAccountRoles } from '../lib/accountVisibility.js';
 
 const createConversationSchema = z.object({
   participantId: z.string().min(1).optional(),
@@ -378,8 +379,12 @@ messagesRouter.post('/conversations', requireAuth, async (req, res) => {
   const dbAvailable = await isDatabaseAvailable();
 
   if (dbAvailable) {
-    const targetUsers = await prisma.user.findMany({ where: { id: { in: participantIds } }, select: { id: true } });
+    const targetUsers = await prisma.user.findMany({ where: { id: { in: participantIds } }, select: { id: true, role: true } });
     if (targetUsers.length !== participantIds.length) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+    if (participantIds.length === 1 && !canViewProtectedAccounts(req.user!.role)
+      && targetUsers.some((target) => isProtectedAccountRole(target.role))) {
       return res.status(404).json({ message: 'User not found.' });
     }
 
@@ -462,6 +467,10 @@ messagesRouter.post('/conversations', requireAuth, async (req, res) => {
   }
 
   if (participantIds.some((participantId) => !findUserById(participantId))) {
+    return res.status(404).json({ message: 'User not found.' });
+  }
+  if (participantIds.length === 1 && !canViewProtectedAccounts(req.user!.role)
+    && participantIds.some((participantId) => isProtectedAccountRole(findUserById(participantId)?.role))) {
     return res.status(404).json({ message: 'User not found.' });
   }
 
@@ -732,6 +741,16 @@ messagesRouter.post('/conversations/:id/messages', requireAuth, async (req, res)
     const participants = socialStore.state.conversationParticipants.filter((participant) => participant.conversationId === conversationId && !participant.leftAt);
     return participants.filter((participant) => participant.userId !== userId).map((participant) => participant.userId);
   })();
+
+  if (recipients.length === 1 && !conversation.isChannel && !canViewProtectedAccounts(req.user!.role)) {
+    const protectedRecipients = dbAvailable
+      ? await prisma.user.findMany({
+        where: { id: { in: recipients }, role: { in: [...protectedAccountRoles] } },
+        select: { id: true },
+      })
+      : recipients.filter((recipientId) => isProtectedAccountRole(findUserById(recipientId)?.role));
+    if (protectedRecipients.length) return res.status(403).json({ message: 'You cannot message this user.' });
+  }
 
   for (const recipientId of recipients) {
     if (await isBlocked(userId, recipientId)) {
@@ -1333,7 +1352,7 @@ messagesRouter.post('/messages/:id/forward', requireAuth, async (req, res) => {
   if (!source || source.deletedAt || source.moderationHiddenAt) return res.status(404).json({ message: 'Message not found.' });
   if (!(await canViewConversation(source.conversationId, userId))) return res.status(403).json({ message: 'You do not have access to this message.' });
   const target = dbAvailable
-    ? await prisma.conversation.findUnique({ where: { id: targetConversationId }, select: { isChannel: true, disappearingAfterSeconds: true } })
+    ? await prisma.conversation.findUnique({ where: { id: targetConversationId }, select: { isChannel: true, isGroup: true, disappearingAfterSeconds: true } })
     : socialStore.state.conversations.find((entry) => entry.id === targetConversationId);
   if (!target) return res.status(404).json({ message: 'Destination conversation not found.' });
   if (target.isChannel) {
@@ -1345,6 +1364,18 @@ messagesRouter.post('/messages/:id/forward', requireAuth, async (req, res) => {
   const recipients = dbAvailable
     ? (await prisma.conversationParticipant.findMany({ where: { conversationId: targetConversationId, leftAt: null }, select: { userId: true } })).map((entry) => entry.userId)
     : socialStore.state.conversationParticipants.filter((entry) => entry.conversationId === targetConversationId && !entry.leftAt).map((entry) => entry.userId);
+  const otherRecipients = recipients.filter((recipientId) => recipientId !== userId);
+  if (otherRecipients.length === 1 && !target.isChannel && !canViewProtectedAccounts(req.user!.role)) {
+    const hasProtectedRecipient = dbAvailable
+      ? (await prisma.user.findMany({
+        where: { id: { in: otherRecipients }, role: { in: [...protectedAccountRoles] } },
+        select: { id: true },
+      })).length > 0
+      : otherRecipients.some((recipientId) => isProtectedAccountRole(findUserById(recipientId)?.role));
+    if (hasProtectedRecipient) {
+      return res.status(403).json({ message: 'You cannot message this user.' });
+    }
+  }
   for (const recipientId of recipients) {
     if (recipientId !== userId && await isBlocked(userId, recipientId)) return res.status(403).json({ message: 'You cannot forward messages to a blocked user.' });
   }

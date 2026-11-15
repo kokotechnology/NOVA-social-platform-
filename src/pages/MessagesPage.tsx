@@ -71,7 +71,7 @@ function getTimedUpdatePreview(value: unknown): TimedUpdatePreview | null {
   }
 }
 
-function MessageMediaAttachment({ message, isOwn }: { message: MessageItem; isOwn: boolean }) {
+function MessageMediaAttachment({ message, isOwn, isOwnPrivate }: { message: MessageItem; isOwn: boolean; isOwnPrivate: boolean }) {
   const [loadedMedia, setLoadedMedia] = useState<{ url: string; source: string; error: string }>({ url: '', source: '', error: '' })
   const [failedRemoteUrl, setFailedRemoteUrl] = useState('')
   const mediaUrl = message.mediaUrl ?? ''
@@ -110,8 +110,8 @@ function MessageMediaAttachment({ message, isOwn }: { message: MessageItem; isOw
   if (message.contentType === 'DOCUMENT') {
     const filename = mediaUrl.toLowerCase().endsWith('.pdf') ? 'attachment.pdf' : 'attachment.docx'
     return <div className="mb-2 flex flex-wrap gap-3">
-      <a href={source} target="_blank" rel="noreferrer" className={`underline ${isOwn ? 'text-white' : 'text-indigo-700'}`}>Open document</a>
-      <a href={source} download={filename} className={`underline ${isOwn ? 'text-white' : 'text-indigo-700'}`}>Download document</a>
+      <a href={source} target="_blank" rel="noreferrer" className={`underline ${isOwnPrivate ? 'text-slate-900' : isOwn ? 'text-white' : 'text-indigo-700'}`}>Open document</a>
+      <a href={source} download={filename} className={`underline ${isOwnPrivate ? 'text-slate-900' : isOwn ? 'text-white' : 'text-indigo-700'}`}>Download document</a>
     </div>
   }
   return null
@@ -1398,6 +1398,7 @@ export function MessagesPage() {
                 {!messagesLoading && !searchResults && messages.length === 0 ? <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-6 text-center text-sm text-slate-500">No messages yet. Start the conversation.</div> : null}
                 {(searchResults ?? messages).map((message, index) => {
                   const isOwn = message.senderId === user?.id
+                  const isOwnPrivate = isOwn && !activeConversation.isGroup
                   const reply = message.replyToId ? messages.find((item) => item.id === message.replyToId) : null
                   const previousMessage = (searchResults ?? messages)[index - 1]
                   const startsNewDate = !previousMessage || new Date(previousMessage.createdAt).toDateString() !== new Date(message.createdAt).toDateString()
@@ -1412,10 +1413,10 @@ export function MessagesPage() {
                     <Fragment key={message.id}>
                     {startsNewDate ? <div className="my-3 flex justify-center"><span className="rounded-lg bg-white/90 px-3 py-1 text-[11px] font-medium text-slate-600 shadow-sm">{dateLabel}</span></div> : null}
                     <div className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}>
-                      <div className={`max-w-[86%] rounded-2xl px-3 py-2 text-sm shadow-sm sm:max-w-[70%] ${isOwn ? 'rounded-tr-sm bg-[#d9fdd3] text-slate-800' : 'rounded-tl-sm bg-white text-slate-700'}`}>
-                        {message.forwardedFromId ? <p className={`mb-1 text-[10px] ${isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>Forwarded</p> : null}
-                        {reply ? <p className={`mb-2 border-l-2 pl-2 text-xs ${isOwn ? 'border-indigo-200 text-indigo-100' : 'border-indigo-400 text-slate-500'}`}>{reply.text}</p> : null}
-                        {timedUpdate ? <Link to={timedUpdate.kind === 'STORY' ? `/?story=${encodeURIComponent(timedUpdate.id)}` : `/updates?status=${encodeURIComponent(timedUpdate.id)}`} className={`mb-2 block max-w-xs rounded-xl border p-2 ${isOwn ? 'border-emerald-700/30 bg-white/50' : 'border-slate-200 bg-slate-50'}`}>
+                      <div className={`max-w-[86%] rounded-2xl px-3 py-2 text-sm shadow-sm sm:max-w-[70%] ${isOwnPrivate ? 'rounded-tr-sm bg-white text-slate-900' : isOwn ? 'rounded-tr-sm bg-[#d9fdd3] text-slate-800' : 'rounded-tl-sm bg-white text-slate-700'}`}>
+                        {message.forwardedFromId ? <p className={`mb-1 text-[10px] ${isOwnPrivate ? 'text-slate-600' : isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>Forwarded</p> : null}
+                        {reply ? <p className={`mb-2 border-l-2 pl-2 text-xs ${isOwnPrivate ? 'border-indigo-200 bg-white text-slate-700' : isOwn ? 'border-indigo-200 text-indigo-100' : 'border-indigo-400 text-slate-500'}`}>{reply.text}</p> : null}
+                        {timedUpdate ? <Link to={timedUpdate.kind === 'STORY' ? `/?story=${encodeURIComponent(timedUpdate.id)}` : `/updates?status=${encodeURIComponent(timedUpdate.id)}`} className={`mb-2 block max-w-xs rounded-xl border p-2 ${isOwnPrivate ? 'border-slate-200 bg-white text-slate-900' : isOwn ? 'border-emerald-700/30 bg-white/50' : 'border-slate-200 bg-slate-50'}`}>
                           <span className="block text-[10px] font-bold uppercase tracking-wide">{timedUpdate.kind === 'STORY' ? 'Story' : 'Status'} reply</span>
                           {timedUpdate.mediaUrl ? isVideoStoryMedia(timedUpdate.mediaUrl)
                             ? <video src={resolveMediaUrl(timedUpdate.mediaUrl)} crossOrigin={timedUpdate.mediaUrl.startsWith('/api/media/') ? 'use-credentials' : undefined} muted playsInline preload="metadata" className="mt-1 max-h-24 w-full rounded-lg object-cover" />
@@ -1424,7 +1425,7 @@ export function MessagesPage() {
                           {timedUpdate.text ? <span className="mt-1 block line-clamp-2 whitespace-pre-wrap text-xs">{timedUpdate.text}</span> : null}
                           <span className="mt-1 block text-[10px] font-semibold underline">Open original while available</span>
                         </Link> : null}
-                        {['IMAGE', 'VIDEO', 'VOICE', 'DOCUMENT', 'GIF', 'STICKER'].includes(message.contentType ?? '') && message.mediaUrl ? <MessageMediaAttachment message={message} isOwn={isOwn} /> : null}
+                        {['IMAGE', 'VIDEO', 'VOICE', 'DOCUMENT', 'GIF', 'STICKER'].includes(message.contentType ?? '') && message.mediaUrl ? <MessageMediaAttachment message={message} isOwn={isOwn} isOwnPrivate={isOwnPrivate} /> : null}
                         {message.text ? <p className="whitespace-pre-wrap">{message.text}</p> : null}
                         {message.contentType === 'CONTACT' && message.metadata ? <p><strong>{String(message.metadata.name ?? 'Contact')}</strong><br /><a href={`tel:${encodeURIComponent(String(message.metadata.phone ?? ''))}`} className="underline">{String(message.metadata.phone ?? '')}</a></p> : null}
                         {message.contentType === 'LOCATION' && message.metadata ? <a href={`https://maps.google.com/?q=${encodeURIComponent(`${String(message.metadata.latitude)},${String(message.metadata.longitude)}`)}`} target="_blank" rel="noreferrer" className="underline">{String(message.metadata.label ?? 'Location')} · Open map</a> : null}
@@ -1433,15 +1434,15 @@ export function MessagesPage() {
                           const selected = pollVotes[user?.id ?? ''] === option.id
                           return <button key={option.id} type="button" onClick={() => void respondToInteractiveMessage(message, { optionId: option.id })} aria-pressed={selected} className={`relative w-full overflow-hidden rounded-lg border px-2.5 py-2 text-left text-xs ${selected ? 'border-[#078744]' : 'border-slate-200'}`}><span className="absolute inset-y-0 left-0 bg-[#e8f5e9]" style={{ width: `${pollVoteCount ? voteCount / pollVoteCount * 100 : 0}%` }} /><span className="relative flex justify-between gap-2"><span>{option.text}</span><span>{voteCount}</span></span></button>
                         })}</div><p className="mt-1 text-[10px] text-slate-500">{pollVoteCount} votes</p></section> : null}
-                        {message.contentType === 'EVENT' && message.metadata ? <section className="min-w-[220px]" aria-label="Event"><p className="font-semibold">{String(message.metadata.title ?? 'Event')}</p><p className="mt-1 text-xs">{new Date(String(message.metadata.startsAt ?? '')).toLocaleString()}</p><div className="mt-2 flex gap-1">{([['GOING', 'Going'], ['MAYBE', 'Maybe'], ['NOT_GOING', 'Can’t go']] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={eventResponses[user?.id ?? ''] === value} onClick={() => void respondToInteractiveMessage(message, { response: value })} className={`rounded-full px-2 py-1 text-[10px] font-semibold ${eventResponses[user?.id ?? ''] === value ? 'bg-[#078744] text-white' : 'bg-slate-100 text-slate-700'}`}>{label}</button>)}</div><p className="mt-1 text-[10px] text-slate-500">{Object.values(eventResponses).filter((value) => value === 'GOING').length} going</p></section> : null}
-                        <div className={`mt-1 flex items-center gap-1 text-[10px] ${isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>
+                        {message.contentType === 'EVENT' && message.metadata ? <section className="min-w-[220px]" aria-label="Event"><p className="font-semibold">{String(message.metadata.title ?? 'Event')}</p><p className="mt-1 text-xs">{new Date(String(message.metadata.startsAt ?? '')).toLocaleString()}</p><div className="mt-2 flex gap-1">{([['GOING', 'Going'], ['MAYBE', 'Maybe'], ['NOT_GOING', 'Can’t go']] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={eventResponses[user?.id ?? ''] === value} onClick={() => void respondToInteractiveMessage(message, { response: value })} className={`rounded-full px-2 py-1 text-[10px] font-semibold ${eventResponses[user?.id ?? ''] === value ? isOwnPrivate ? 'bg-white text-slate-900' : 'bg-[#078744] text-white' : 'bg-slate-100 text-slate-700'}`}>{label}</button>)}</div><p className="mt-1 text-[10px] text-slate-500">{Object.values(eventResponses).filter((value) => value === 'GOING').length} going</p></section> : null}
+                        <div className={`mt-1 flex items-center gap-1 text-[10px] ${isOwnPrivate ? 'text-slate-600' : isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>
                           <span>{new Date(message.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
                           {message.editedAt ? <span>· edited</span> : null}
                           {isOwn ? message.readAt || message.status === 'READ' ? <CheckCheck className="h-3.5 w-3.5 text-[#53bdeb]" aria-label="Read" /> : message.status === 'DELIVERED' ? <CheckCheck className="h-3.5 w-3.5 text-slate-500" aria-label="Delivered" /> : <Check className="h-3.5 w-3.5 text-slate-500" aria-label="Sent" /> : null}
                         </div>
                         {message.pinnedAt || message.starredAt ? <p className={`mt-1 flex items-center gap-1 text-[10px] ${isOwn ? 'text-slate-600' : 'text-slate-500'}`}>{message.pinnedAt ? <span className="inline-flex items-center gap-0.5"><Pin className="h-3 w-3" />Pinned</span> : null}{message.starredAt ? <span className="inline-flex items-center gap-0.5"><Star className="h-3 w-3 fill-amber-400 text-amber-500" />Starred</span> : null}</p> : null}
-                        {message.reactions?.length ? <p className={`mt-1 text-xs ${isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>{message.reactions.map((reaction) => reaction.type).join(' ')}</p> : null}
-                        {!message.deletedAt ? <div className={`mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] ${isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>
+                        {message.reactions?.length ? <p className={`mt-1 text-xs ${isOwnPrivate ? 'bg-white text-slate-900' : isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>{message.reactions.map((reaction) => reaction.type).join(' ')}</p> : null}
+                        {!message.deletedAt ? <div className={`mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] ${isOwnPrivate ? 'text-slate-700' : isOwn ? 'text-indigo-100' : 'text-slate-500'}`}>
                           <button type="button" onClick={() => setReplyTarget(message)} className="hover:underline">Reply</button>
                           <button type="button" onClick={() => setReactionTargetId(reactionTargetId === message.id ? '' : message.id)} className="hover:underline" aria-expanded={reactionTargetId === message.id}>React</button>
                           <button type="button" onClick={() => { setForwardingId(forwardingId === message.id ? '' : message.id); setForwardTargetId('') }} className="hover:underline">Forward</button>
@@ -1454,9 +1455,9 @@ export function MessagesPage() {
                           {isOwn && message.contentType === 'TEXT' ? <button type="button" onClick={() => { setEditingId(message.id); setEditDraft(message.text) }} className="hover:underline">Edit</button> : null}
                           {isOwn ? <button type="button" onClick={() => void deleteMessage(message)} className="hover:underline">Delete</button> : null}
                         </div> : null}
-                        {reactionTargetId === message.id ? <div aria-label="Choose a reaction" className="mt-2 flex gap-1 rounded-full bg-white/80 p-1">{['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => <button key={emoji} type="button" onClick={() => void toggleReaction(message, emoji)} aria-label={`React ${emoji}`} className="rounded-full px-1.5 py-1 text-base hover:bg-slate-100">{emoji}</button>)}</div> : null}
+                        {reactionTargetId === message.id ? <div aria-label="Choose a reaction" className={`mt-2 flex gap-1 rounded-full p-1 ${isOwnPrivate ? 'bg-white text-slate-900' : 'bg-white/80'}`}>{['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => <button key={emoji} type="button" onClick={() => void toggleReaction(message, emoji)} aria-label={`React ${emoji}`} className="rounded-full px-1.5 py-1 text-base hover:bg-slate-100">{emoji}</button>)}</div> : null}
                         {editingId === message.id ? <div className="mt-2 flex gap-2"><input value={editDraft} onChange={(event) => setEditDraft(event.target.value)} className="min-w-0 flex-1 rounded-lg px-2 py-1 text-slate-900" /><button type="button" onClick={() => void saveMessageEdit(message)} className="font-semibold">Save</button><button type="button" onClick={() => setEditingId('')}>Cancel</button></div> : null}
-                        {forwardingId === message.id ? <div className="mt-2 flex gap-2"><select aria-label="Forward to conversation" value={forwardTargetId} onChange={(event) => setForwardTargetId(event.target.value)} className="min-w-0 flex-1 rounded-lg px-2 py-1 text-slate-900"><option value="">Choose chat</option>{conversations.filter((item) => item.id !== selectedId).map((item) => <option key={item.id} value={item.id}>{item.name ?? item.participants.find((participant) => participant.userId !== user?.id)?.user?.name ?? 'Group chat'}</option>)}</select><button type="button" disabled={!forwardTargetId} onClick={() => void forwardMessage(message)} className="font-semibold disabled:opacity-50">Send</button></div> : null}
+                        {forwardingId === message.id ? <div className="mt-2 flex gap-2"><select aria-label="Forward to conversation" value={forwardTargetId} onChange={(event) => setForwardTargetId(event.target.value)} className={`min-w-0 flex-1 rounded-lg px-2 py-1 text-slate-900 ${isOwnPrivate ? 'bg-white' : ''}`}><option value="">Choose chat</option>{conversations.filter((item) => item.id !== selectedId).map((item) => <option key={item.id} value={item.id}>{item.name ?? item.participants.find((participant) => participant.userId !== user?.id)?.user?.name ?? 'Group chat'}</option>)}</select><button type="button" disabled={!forwardTargetId} onClick={() => void forwardMessage(message)} className={`font-semibold disabled:opacity-50 ${isOwnPrivate ? 'bg-white text-slate-900' : ''}`}>Send</button></div> : null}
                         {receiptInfoTarget === message.id ? <section aria-label="Message information" className="mt-2 min-w-48 rounded-lg border border-slate-200 bg-white p-2 text-slate-700">
                           <div className="flex items-center justify-between gap-2"><p className="text-xs font-semibold">Message information</p><button type="button" aria-label="Close message information" onClick={() => setReceiptInfoTarget('')}><X className="h-3.5 w-3.5" /></button></div>
                           {receiptInfoRows.map((receipt) => <div key={receipt.recipientId} className="mt-2 border-t border-slate-100 pt-2 text-[10px]">

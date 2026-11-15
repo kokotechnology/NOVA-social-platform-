@@ -11,6 +11,7 @@ import { audioMediaKeyFromUrl, getMediaStorage, imageFileMediaKeyFromUrl, mediaK
 import { canDeleteLiveReplayMedia } from '../lib/liveReplayPolicy.js';
 import { deleteLiveKitEgressFile, stopLiveKitEgress } from '../lib/livekitEgress.js';
 import { decryptPrivateAddress, encryptPrivateAddress } from '../lib/privateProfile.js';
+import { canViewProtectedAccounts, isProtectedAccountRole, protectedAccountRoles } from '../lib/accountVisibility.js';
 
 function isSafeMediaUrl(value: string) {
   if (value === '' || mediaKeyFromUrl(value) || videoMediaKeyFromUrl(value)) return true;
@@ -649,9 +650,11 @@ socialRouter.delete('/statuses/:id', requireAuth, requireAccountAccess, (req, re
 
 socialRouter.get('/users', async (req, res) => {
   const dbAvailable = await isDatabaseAvailable();
+  const canViewProtected = canViewProtectedAccounts(req.user?.role);
 
   if (dbAvailable) {
     const users = await prisma.user.findMany({
+      where: canViewProtected ? {} : { role: { notIn: [...protectedAccountRoles] } },
       select: {
         id: true,
         email: true,
@@ -689,7 +692,9 @@ socialRouter.get('/users', async (req, res) => {
     return res.json({ users: result });
   }
 
-  const users = fallbackStore.list().map((user) => ({ ...user, profile: getProfileForUserId(user.id) }));
+  const users = fallbackStore.list()
+    .filter((user) => canViewProtected || !isProtectedAccountRole(user.role))
+    .map((user) => ({ ...user, profile: getProfileForUserId(user.id) }));
   const result = await Promise.all(users.map(async (user) => {
     const counts = await getFollowCounts(user.id);
     const relationship = req.user && req.user.id !== user.id
@@ -711,6 +716,9 @@ socialRouter.get('/users/:id', async (req, res) => {
   const user = await getUserById(userId);
 
   if (!user) {
+    return res.status(404).json({ message: 'User not found.' });
+  }
+  if (isProtectedAccountRole(user.role) && req.user?.id !== user.id && !canViewProtectedAccounts(req.user?.role)) {
     return res.status(404).json({ message: 'User not found.' });
   }
 
@@ -736,6 +744,9 @@ socialRouter.get('/users/:id/profile', async (req, res: Response) => {
   const user = await getUserById(userId);
 
   if (!user) {
+    return res.status(404).json({ message: 'User not found.' });
+  }
+  if (isProtectedAccountRole(user.role) && req.user?.id !== user.id && !canViewProtectedAccounts(req.user?.role)) {
     return res.status(404).json({ message: 'User not found.' });
   }
 

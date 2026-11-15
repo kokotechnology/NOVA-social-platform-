@@ -105,7 +105,7 @@ export function AuthPage({ mode }: AuthPageProps) {
   const inputClassName = 'mt-1.5 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-slate-800 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-100'
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-100 via-violet-50 to-cyan-50 p-4">
+    <div className="flex min-h-screen min-h-[100dvh] items-start justify-center overflow-y-auto bg-gradient-to-br from-slate-100 via-violet-50 to-cyan-50 p-4 sm:items-center">
       <div className="grid w-full max-w-5xl overflow-hidden rounded-[32px] border border-slate-200 bg-white shadow-2xl lg:grid-cols-[1.1fr_0.9fr]">
         <div className="hidden bg-gradient-to-br from-violet-600 via-indigo-600 to-cyan-500 p-8 text-white lg:flex lg:flex-col lg:justify-between">
           <div>
