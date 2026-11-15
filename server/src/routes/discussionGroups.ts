@@ -306,6 +306,10 @@ async function formatPost(post: any, viewerId: string) {
   };
 }
 
+function isUniqueConstraintError(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002';
+}
+
 router.get('/discussion-groups', requireAuth, async (req, res) => {
   const userId = req.user!.id;
   const query = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
@@ -1125,9 +1129,10 @@ router.patch('/discussion-groups/:id/posts/:postId/feature', requireAuth, async 
 router.post('/discussion-groups/:id/posts/:postId/share', requireAuth, async (req, res) => {
   const sourceGroupId = String(req.params.id);
   const sourcePostId = String(req.params.postId);
-  const { targetGroupId, content } = z.object({
+  const { targetGroupId, content, requestId } = z.object({
     targetGroupId: z.string().min(1),
     content: z.string().trim().max(2000).default(''),
+    requestId: z.string().uuid(),
   }).parse(req.body ?? {});
   const sourceGroup = await findGroup(sourceGroupId);
   const targetGroup = await findGroup(targetGroupId);
@@ -1151,10 +1156,9 @@ router.post('/discussion-groups/:id/posts/:postId/share', requireAuth, async (re
     ? prisma.discussionGroupPost.findFirst({ where: { id: sourcePostId, groupId: sourceGroupId, status: 'APPROVED' }, select: { id: true } })
     : socialStore.state.discussionPosts.find((post) => post.id === sourcePostId && post.groupId === sourceGroupId && post.status === 'APPROVED'))();
   if (!sourcePost) return res.status(404).json({ message: 'Post not found.' });
-  const postStatus = targetGroup.postApproval && !managerRoles.includes(targetMembership.role) ? 'PENDING' : 'APPROVED';
   if (await isDatabaseAvailable()) {
-    const post = await prisma.discussionGroupPost.create({
-      data: { groupId: targetGroupId, authorId: req.user!.id, type: 'TEXT', content, status: postStatus, sharedFromId: sourcePostId },
+    const prior = await prisma.discussionGroupPost.findUnique({
+      where: { shareRequestId: requestId },
       include: {
         author: { select: { id: true, name: true, profile: { select: { displayName: true, avatarUrl: true } } } },
         sharedFrom: {
@@ -1166,6 +1170,42 @@ router.post('/discussion-groups/:id/posts/:postId/share', requireAuth, async (re
         },
       },
     });
+    if (prior) {
+      if (prior.authorId !== req.user!.id || prior.groupId !== targetGroupId || prior.sharedFromId !== sourcePostId || prior.content !== content) {
+        return res.status(409).json({ message: 'This share request has already been used.' });
+      }
+      return res.status(200).json({ post: await formatPost(prior, req.user!.id), duplicate: true });
+    }
+  } else {
+    const prior = socialStore.state.discussionPosts.find((post) => post.shareRequestId === requestId);
+    if (prior) {
+      if (prior.authorId !== req.user!.id || prior.groupId !== targetGroupId || prior.sharedFromId !== sourcePostId || prior.content !== content) {
+        return res.status(409).json({ message: 'This share request has already been used.' });
+      }
+      return res.status(200).json({ post: await formatPost(prior, req.user!.id), duplicate: true });
+    }
+  }
+  const postStatus = targetGroup.postApproval && !managerRoles.includes(targetMembership.role) ? 'PENDING' : 'APPROVED';
+  if (await isDatabaseAvailable()) {
+    let post;
+    try {
+      post = await prisma.discussionGroupPost.create({
+        data: { groupId: targetGroupId, authorId: req.user!.id, type: 'TEXT', content, status: postStatus, sharedFromId: sourcePostId, shareRequestId: requestId },
+        include: {
+          author: { select: { id: true, name: true, profile: { select: { displayName: true, avatarUrl: true } } } },
+          sharedFrom: {
+            include: {
+              group: { select: { id: true, privacy: true, visibility: true } },
+              author: { select: { id: true, name: true, profile: { select: { displayName: true, avatarUrl: true } } } },
+              media: { orderBy: { position: 'asc' } },
+            },
+          },
+        },
+      });
+    } catch (error) {
+      if (isUniqueConstraintError(error)) return res.status(409).json({ message: 'This share request has already been used. Retry with the same request.' });
+      throw error;
+    }
 
     if (postStatus === 'APPROVED') {
       const recipients = await prisma.discussionGroupMembership.findMany({ where: { groupId: targetGroupId, userId: { not: req.user!.id } }, select: { userId: true } });
@@ -1181,7 +1221,7 @@ router.post('/discussion-groups/:id/posts/:postId/share', requireAuth, async (re
   const post = {
     id: makeId('dg_post'), groupId: targetGroupId, authorId: req.user!.id, type: 'TEXT', content,
     linkUrl: null, status: postStatus, isPinned: false, isFeatured: false, sharedFromId: sourcePostId,
-    createdAt: now, updatedAt: now, author: safeUserSummary(req.user!.id),
+    shareRequestId: requestId, createdAt: now, updatedAt: now, author: safeUserSummary(req.user!.id),
   };
   socialStore.state.discussionPosts.push(post);
   if (postStatus === 'APPROVED') {
@@ -1227,9 +1267,10 @@ router.post('/discussion-groups/:id/posts/:postId/share-count', requireAuth, asy
 
 router.post('/discussion-groups/:id/share', requireAuth, async (req, res) => {
   const groupId = String(req.params.id);
-  const { postId, content = '' } = z.object({
+  const { postId, content = '', requestId } = z.object({
     postId: z.string().min(1).max(128),
     content: z.string().trim().max(2000).default(''),
+    requestId: z.string().uuid(),
   }).parse(req.body ?? {});
   const group = await findGroup(groupId);
   if (!group) return res.status(404).json({ message: 'Discussion group not found.' });
@@ -1246,22 +1287,52 @@ router.post('/discussion-groups/:id/share', requireAuth, async (req, res) => {
   if (!source || source.visibility !== 'PUBLIC' || source.moderationHiddenAt) {
     return res.status(404).json({ message: 'This post cannot be shared to a group.' });
   }
-  const status = group.postApproval && !managerRoles.includes(member.role) ? 'PENDING' : 'APPROVED';
   if (db) {
-    const post = await prisma.discussionGroupPost.create({
-      data: { groupId, authorId: req.user!.id, type: 'TEXT', content, status, sharedPostId: source.id },
+    const prior = await prisma.discussionGroupPost.findUnique({
+      where: { shareRequestId: requestId },
       include: {
         author: { select: { id: true, name: true, profile: { select: { displayName: true, avatarUrl: true } } } },
         sharedPost: { include: { author: { select: { id: true, name: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } } } },
         media: true,
       },
     });
+    if (prior) {
+      if (prior.authorId !== req.user!.id || prior.groupId !== groupId || prior.sharedPostId !== source.id || prior.content !== content) {
+        return res.status(409).json({ message: 'This share request has already been used.' });
+      }
+      return res.status(200).json({ post: await formatPost(prior, req.user!.id), duplicate: true });
+    }
+  } else {
+    const prior = socialStore.state.discussionPosts.find((entry) => entry.shareRequestId === requestId);
+    if (prior) {
+      if (prior.authorId !== req.user!.id || prior.groupId !== groupId || prior.sharedPostId !== source.id || prior.content !== content) {
+        return res.status(409).json({ message: 'This share request has already been used.' });
+      }
+      return res.status(200).json({ post: await formatPost(prior, req.user!.id), duplicate: true });
+    }
+  }
+  const status = group.postApproval && !managerRoles.includes(member.role) ? 'PENDING' : 'APPROVED';
+  if (db) {
+    let post;
+    try {
+      post = await prisma.discussionGroupPost.create({
+        data: { groupId, authorId: req.user!.id, type: 'TEXT', content, status, sharedPostId: source.id, shareRequestId: requestId },
+        include: {
+          author: { select: { id: true, name: true, profile: { select: { displayName: true, avatarUrl: true } } } },
+          sharedPost: { include: { author: { select: { id: true, name: true, profile: { select: { displayName: true, username: true, avatarUrl: true } } } } } },
+          media: true,
+        },
+      });
+    } catch (error) {
+      if (isUniqueConstraintError(error)) return res.status(409).json({ message: 'This share request has already been used. Retry with the same request.' });
+      throw error;
+    }
     if (status === 'APPROVED') await emitDiscussionFeedUpdate(groupId, group);
     return res.status(201).json({ post: await formatPost(post, req.user!.id) });
   }
   const post = {
     id: makeId('dg_post'), groupId, authorId: req.user!.id, type: 'TEXT', content, linkUrl: null, status,
-    isPinned: false, isFeatured: false, sharedFromId: null, sharedPostId: source.id,
+    isPinned: false, isFeatured: false, sharedFromId: null, sharedPostId: source.id, shareRequestId: requestId,
     createdAt: nowIso(), updatedAt: nowIso(), author: safeUserSummary(req.user!.id),
   };
   socialStore.state.discussionPosts.push(post);

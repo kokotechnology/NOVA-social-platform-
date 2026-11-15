@@ -278,13 +278,33 @@ describe('Discussion Groups', () => {
 
     const destination = await request(app).post('/api/discussion-groups').set('Cookie', owner.auth).send({ name: 'Workflow Destination' });
     await request(app).post(`/api/discussion-groups/${destination.body.group.id}/join`).set('Cookie', member.auth);
-    const shared = await request(app).post(`/api/discussion-groups/${sourceId}/posts/${firstPost.body.post.id}/share`).set('Cookie', member.auth).send({
-      targetGroupId: destination.body.group.id, content: 'Sharing this for the destination group.',
-    });
+    const groupShareRequestId = 'c48b2b7c-f405-4589-bcaf-c536cb57b880';
+    const sharePayload = {
+      targetGroupId: destination.body.group.id,
+      content: 'Sharing this for the destination group.',
+      requestId: groupShareRequestId,
+    };
+    const shared = await request(app).post(`/api/discussion-groups/${sourceId}/posts/${firstPost.body.post.id}/share`).set('Cookie', member.auth).send(sharePayload);
     expect(shared.status).toBe(201);
+    const duplicateGroupShare = await request(app).post(`/api/discussion-groups/${sourceId}/posts/${firstPost.body.post.id}/share`).set('Cookie', member.auth).send(sharePayload);
+    expect(duplicateGroupShare.status).toBe(200);
+    expect(duplicateGroupShare.body.duplicate).toBe(true);
+
+    const socialPost = await request(app).post('/api/posts').set('Cookie', owner.auth).send({ content: 'A social post for a group.' });
+    const socialShareRequestId = 'd90b5d17-43d2-48aa-a6b8-d9fd72c8e877';
+    const socialSharePayload = { postId: socialPost.body.post.id, content: 'Sharing a social post.', requestId: socialShareRequestId };
+    const socialShare = await request(app).post(`/api/discussion-groups/${destination.body.group.id}/share`)
+      .set('Cookie', member.auth).send(socialSharePayload);
+    expect(socialShare.status).toBe(201);
+    const duplicateSocialShare = await request(app).post(`/api/discussion-groups/${destination.body.group.id}/share`)
+      .set('Cookie', member.auth).send(socialSharePayload);
+    expect(duplicateSocialShare.status).toBe(200);
+    expect(duplicateSocialShare.body.duplicate).toBe(true);
+
     const destinationFeed = await request(app).get(`/api/discussion-groups/${destination.body.group.id}`).set('Cookie', member.auth);
-    expect(destinationFeed.body.group.posts[0].sharedPost.id).toBe(firstPost.body.post.id);
-    expect(destinationFeed.body.group.posts[0].content).toContain('Sharing this');
+    expect(destinationFeed.body.group.posts).toHaveLength(2);
+    expect(destinationFeed.body.group.posts[1].sharedPost.id).toBe(firstPost.body.post.id);
+    expect(destinationFeed.body.group.posts[1].content).toContain('Sharing this');
   }, 30_000);
 
   it('prevents banned users from reading private group media and rejoining', async () => {

@@ -54,6 +54,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
   const [shareOpen, setShareOpen] = useState(false)
   const [shareBusy, setShareBusy] = useState(false)
   const [shareRequestId, setShareRequestId] = useState('')
+  const [groupShareRequestIds, setGroupShareRequestIds] = useState<Record<string, string>>({})
   const [shareConversations, setShareConversations] = useState<ShareConversation[]>([])
   const [shareFriends, setShareFriends] = useState<Array<{ id: string; name: string; profile?: { avatarUrl?: string | null } | null }>>([])
   const [shareGroups, setShareGroups] = useState<Array<{ id: string; name: string }>>([])
@@ -298,23 +299,30 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
       setError('Join this Discussion Group before sharing its post to another group.')
       return
     }
+    const requestId = groupShareRequestIds[groupId] ?? crypto.randomUUID()
+    setGroupShareRequestIds((current) => ({ ...current, [groupId]: requestId }))
     setShareBusy(true)
     setError('')
     try {
       if (isGroupPost) {
         await apiRequest(`${groupPostPath}/share`, {
           method: 'POST',
-          body: JSON.stringify({ targetGroupId: groupId, content: shareCommentary.trim() }),
+          body: JSON.stringify({ targetGroupId: groupId, content: shareCommentary.trim(), requestId }),
         })
       } else {
         await apiRequest(`/api/discussion-groups/${encodeURIComponent(groupId)}/share`, {
           method: 'POST',
-          body: JSON.stringify({ postId: post.id, content: shareCommentary.trim() }),
+          body: JSON.stringify({ postId: post.id, content: shareCommentary.trim(), requestId }),
         })
       }
       if (!isGroupPost) await recordPostShare()
       setNotice('Shared to the Discussion Group.')
       setShareOpen(false)
+      setGroupShareRequestIds((current) => {
+        const next = { ...current }
+        delete next[groupId]
+        return next
+      })
     } catch (shareError) {
       setError(shareError instanceof Error ? shareError.message : 'Unable to share this post to that group.')
     } finally {

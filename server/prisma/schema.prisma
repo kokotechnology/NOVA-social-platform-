@@ -1036,6 +1036,7 @@ model DiscussionGroupPost {
   isFeatured Boolean                   @default(false)
   sharedFromId String?
   sharedPostId String?
+  shareRequestId String? @unique
   createdAt  DateTime                  @default(now())
   updatedAt  DateTime                  @updatedAt
 
