@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { Bookmark, Camera, Copy, ExternalLink, MessageCircle, MessageSquare, PencilLine, Share2, ShieldAlert, ThumbsUp, Trash2, Users, UserRound, X } from 'lucide-react'
 import { Avatar } from './ui/Avatar'
@@ -598,7 +599,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
 
       {notice ? <p className="mt-2 text-sm text-emerald-700" role="status">{notice}</p> : null}
       {error ? <p className="mt-2 text-sm text-rose-700" role="alert">{error}</p> : null}
-      {shareOpen ? <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/55 p-0 sm:items-center sm:p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !shareBusy) setShareOpen(false) }}>
+      {shareOpen ? createPortal(<div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/55 p-0 sm:items-center sm:p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !shareBusy) setShareOpen(false) }}>
         <section aria-label="Share post" role="dialog" aria-modal="true" aria-labelledby={`share-post-title-${post.id}`} className="max-h-[92dvh] w-full max-w-lg overflow-y-auto rounded-t-3xl bg-white p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] text-slate-900 shadow-2xl sm:rounded-3xl">
           <header className="flex items-center justify-between gap-3">
             <div><h3 id={`share-post-title-${post.id}`} className="text-lg font-semibold">{shareMode === 'compose' ? 'Share this post' : `Share to ${shareMode}`}</h3><p className="text-sm text-slate-500">Choose where this post should go.</p></div>
@@ -639,7 +640,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
           </>}
           {error ? <p className="mt-3 text-sm text-rose-700" role="alert">{error}</p> : null}
         </section>
-      </div> : null}
+      </div>, document.body) : null}
 
       {commentsOpen ? (
         <section className="mt-4 border-t border-slate-100 pt-4" aria-label="Post comments">

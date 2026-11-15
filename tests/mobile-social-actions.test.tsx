@@ -51,12 +51,18 @@ describe('mobile social actions', () => {
       host.querySelector<HTMLButtonElement>('[aria-label^="Share post"]')?.click()
     })
 
-    expect(host.querySelector('[role="dialog"][aria-label="Share post"]')).not.toBeNull()
+    const shareDialog = document.body.querySelector<HTMLElement>('[role="dialog"][aria-label="Share post"]')
+    expect(shareDialog).not.toBeNull()
+    expect(shareDialog?.parentElement?.parentElement).toBe(document.body)
+    expect(shareDialog?.querySelector('[aria-label="Share destinations"]')).not.toBeNull()
+    for (const destination of ['Story', 'Discussion Groups', "Friend's Profile", 'WhatsApp', 'Messages', 'Copy Link', 'More']) {
+      expect(Array.from(shareDialog?.querySelectorAll('button') ?? []).some((button) => button.textContent?.trim() === destination)).toBe(true)
+    }
     await act(async () => {
-      Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Story')?.click()
+      Array.from(shareDialog?.querySelectorAll('button') ?? []).find((button) => button.textContent?.trim() === 'Story')?.click()
     })
     expect(onShareToStory).toHaveBeenCalledOnce()
-    expect(host.querySelector('[role="dialog"][aria-label="Share post"]')).toBeNull()
+    expect(document.body.querySelector('[role="dialog"][aria-label="Share post"]')).toBeNull()
 
     await act(async () => root.unmount())
     window.removeEventListener('novachat:share-to-story', onShareToStory)
