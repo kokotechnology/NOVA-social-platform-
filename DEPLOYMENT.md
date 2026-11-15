@@ -26,7 +26,7 @@ Use the existing Vercel project and configure it to deploy the repository's `mai
 
 ## Render
 
-Use the existing Render API service; do not create a second service. The API is a Docker service with `server/` as its root directory and `Dockerfile` as its Dockerfile path. Render Free does not provide a Pre-Deploy Command, so the Docker build runs `npm run db:migrate:deploy` once in its build stage before the new image can start. In the Render service's **Secret Files**, create a file named `database_url` whose contents exactly match the service's production `DATABASE_URL`; keep the existing `DATABASE_URL` environment variable set for runtime. The Dockerfile mounts this file as a BuildKit secret, and `server/.dockerignore` keeps the file out of the image. The build fails and the currently deployed API remains in service if migration fails. Prisma's PostgreSQL advisory lock serializes migration runners; do not disable it. The build keys the migration step to `RENDER_GIT_COMMIT` so BuildKit does not reuse a prior commit's migration layer. Container startup only runs `npm start`, so migrations do not run on application restarts. The server listens on `0.0.0.0` and uses Render's `PORT` when provided.
+Use the existing Render API service; do not create a second service. The API is a Docker service with `server/` as its root directory and `Dockerfile` as its Dockerfile path. Render Free does not provide a Pre-Deploy Command, so the Docker build runs `npm run db:migrate:deploy` once in its build stage before the new image can start. Keep the Render `DATABASE_URL` environment variable set to the pooled Neon connection for application runtime. In the Render service's **Secret Files**, create a separate file named `migration_database_url` containing Neon's direct (non-pooled) PostgreSQL connection string; do not copy the pooled `DATABASE_URL` into this file. The Dockerfile mounts this file as a BuildKit secret only for the migration command, and `server/.dockerignore` keeps it out of the image. Remove the old `database_url` Secret File if present. The build fails and the currently deployed API remains in service if migration fails. Prisma's PostgreSQL advisory lock serializes migration runners; do not disable it. The build keys the migration step to `RENDER_GIT_COMMIT` so BuildKit does not reuse a prior commit's migration layer. Container startup only runs `npm start`, so migrations do not run on application restarts. The server listens on `0.0.0.0` and uses Render's `PORT` when provided.
 
 Configure the Render service environment with the required variable names listed below and in `server/.env.example`. Set `CORS_ORIGIN` to the exact HTTPS Vercel production origin(s), comma-separated if there is more than one. The API also explicitly permits the known Vercel production hostnames in `server/src/app.ts`. Store database URLs and signing keys only in Render's environment settings, never in this repository.
 
@@ -55,7 +55,7 @@ npm run db:migrate:deploy
 npm run db:migrate:status
 ```
 
-`db:migrate:deploy` applies committed migrations without resetting data. On Render, the Docker image build runs it as a BuildKit-secret-backed build step, not during each container startup. Keep the Render `database_url` secret file synchronized with the runtime `DATABASE_URL`. Do not use `db:push` or `migrate dev` against production.
+`db:migrate:deploy` applies committed migrations without resetting data. On Render, the Docker image build runs it as a BuildKit-secret-backed build step, not during each container startup. The Render `migration_database_url` Secret File must contain Neon's direct (non-pooled) connection; the runtime `DATABASE_URL` can remain pooled. Do not use `db:push` or `migrate dev` against production.
 
 For the NOVACHAT account-appeal and moderation changes, the latest migrations are ordered as:
 
@@ -92,7 +92,7 @@ npm --prefix server run build
 npm --prefix server start
 ```
 
-`npm --prefix server run build` never applies migrations. Run `npm --prefix server run db:migrate:deploy` against the intended database as a deployment/release step, then verify it with `npm --prefix server run db:migrate:status`. The production Docker container does not run migrations at startup; its Render image build runs them once before the image starts, using the `database_url` BuildKit secret file described above.
+`npm --prefix server run build` never applies migrations. Run `npm --prefix server run db:migrate:deploy` against the intended database as a deployment/release step, then verify it with `npm --prefix server run db:migrate:status`. The production Docker container does not run migrations at startup; its Render image build runs them once before the image starts, using the `migration_database_url` BuildKit secret file described above.
 
 Frontend:
 
