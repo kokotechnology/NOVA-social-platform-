@@ -1,3 +1,6 @@
+// @vitest-environment happy-dom
+import { act } from 'react'
+import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -31,6 +34,33 @@ describe('mobile social actions', () => {
 
     expect(markup).toContain('aria-label="Share post (0 shares)"')
     expect(markup).toContain('>Share</button>')
+  })
+
+  it('opens the share sheet when crypto.randomUUID is unavailable', async () => {
+    vi.stubGlobal('crypto', {})
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    const onShareToStory = vi.fn()
+    window.addEventListener('novachat:share-to-story', onShareToStory)
+
+    await act(async () => {
+      root.render(<MemoryRouter><PostCard post={post} /></MemoryRouter>)
+    })
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>('[aria-label^="Share post"]')?.click()
+    })
+
+    expect(host.querySelector('[role="dialog"][aria-label="Share post"]')).not.toBeNull()
+    await act(async () => {
+      Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Story')?.click()
+    })
+    expect(onShareToStory).toHaveBeenCalledOnce()
+    expect(host.querySelector('[role="dialog"][aria-label="Share post"]')).toBeNull()
+
+    await act(async () => root.unmount())
+    window.removeEventListener('novachat:share-to-story', onShareToStory)
+    host.remove()
   })
 
   it("shows an explicit Delete action on the current user's own completed live replay post", () => {

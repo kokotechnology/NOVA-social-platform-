@@ -30,6 +30,8 @@ type PostCardProps = {
   onDeleted?: (postId: string) => void
 }
 
+const createShareRequestId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+
 export function PostCard({ post, onDeleted }: PostCardProps) {
   const { user } = useAuth()
   const [likes, setLikes] = useState(post.likes)
@@ -205,7 +207,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     if (isGroupPost) {
       const response = await apiRequest<{ shares: number }>(`${groupPostPath}/share-count`, {
         method: 'POST',
-        body: JSON.stringify({ requestId: crypto.randomUUID() }),
+        body: JSON.stringify({ requestId: createShareRequestId() }),
       })
       setShareCount(response.shares)
       return
@@ -222,7 +224,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
     setShareOpen(true)
     setShareMode('compose')
     setShareCommentary('')
-    setShareRequestId(crypto.randomUUID())
+    setShareRequestId(createShareRequestId())
     setError('')
     setNotice('')
     if (user?.id) {
@@ -280,7 +282,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
           commentary: shareCommentary.trim(),
           visibility: shareAudience,
           ...(sharedToUserId ? { sharedToUserId } : {}),
-          requestId: shareRequestId || crypto.randomUUID(),
+          requestId: shareRequestId || createShareRequestId(),
         }),
       })
       if (!response.duplicate) setShareCount((count) => count + 1)
@@ -299,7 +301,7 @@ export function PostCard({ post, onDeleted }: PostCardProps) {
       setError('Join this Discussion Group before sharing its post to another group.')
       return
     }
-    const requestId = groupShareRequestIds[groupId] ?? crypto.randomUUID()
+    const requestId = groupShareRequestIds[groupId] ?? createShareRequestId()
     setGroupShareRequestIds((current) => ({ ...current, [groupId]: requestId }))
     setShareBusy(true)
     setError('')
