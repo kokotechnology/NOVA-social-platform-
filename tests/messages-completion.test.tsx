@@ -187,6 +187,55 @@ describe('NOVACHAT messaging completion UI', () => {
     expect(state.apiRequest).toHaveBeenCalledWith('/api/conversations/group-chat/unread', expect.objectContaining({ method: 'POST' }))
   })
 
+  it('uses readable light colors only for outgoing group messages and their actions', async () => {
+    const reply = { ...originalMessage, id: 'reply-target', text: 'Original reply text' }
+    const outgoing = {
+      ...originalMessage,
+      id: 'outgoing-group-message',
+      senderId: 'alice',
+      text: 'Forwarded message body',
+      replyToId: reply.id,
+      forwardedFromId: 'previous-message',
+      reactions: [{ userId: 'bob', type: '👍' }],
+    }
+    state.apiRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/conversations') return { conversations: state.conversations }
+      if (path === '/api/conversations/group-chat/messages?limit=50') return { messages: [reply, outgoing], hasMore: false }
+      if (path.endsWith('/read') || path.endsWith('/typing') || path.endsWith('/recording')) return {}
+      return {}
+    })
+    await renderPage()
+
+    const incomingText = [...host.querySelectorAll('p')].find((paragraph) => paragraph.textContent === reply.text)!
+    const incomingBubble = incomingText.parentElement!
+    expect(incomingBubble.className).toContain('bg-white')
+    expect(incomingBubble.className).toContain('text-slate-700')
+    expect(incomingBubble.className).not.toContain('bg-[#d9fdd3]')
+
+    const outgoingText = [...host.querySelectorAll('p')].find((paragraph) => paragraph.textContent === outgoing.text)!
+    const outgoingBubble = outgoingText.parentElement!
+    expect(outgoingBubble.className).toContain('bg-white')
+    expect(outgoingBubble.className).toContain('text-slate-900')
+    expect(outgoingBubble.className).not.toContain('bg-[#d9fdd3]')
+    expect(outgoingBubble.className).toContain('max-w-[86%]')
+    expect(outgoingBubble.className).toContain('rounded-2xl')
+    expect(outgoingBubble.className).toContain('px-3 py-2')
+    expect(outgoingBubble.className).toContain('sm:max-w-[70%]')
+    expect(outgoingBubble.parentElement?.className).toContain('justify-end')
+    expect(outgoingBubble.querySelector('p.border-l-2')?.className).toContain('bg-white')
+    expect(outgoingBubble.querySelector('p.border-l-2')?.className).toContain('text-slate-700')
+    expect([...outgoingBubble.querySelectorAll('p')].find((paragraph) => paragraph.textContent === 'Forwarded')?.className).toContain('text-slate-600')
+    expect([...outgoingBubble.querySelectorAll('p')].find((paragraph) => paragraph.textContent === '👍')?.className).toContain('text-slate-900')
+
+    const actions = [...outgoingBubble.querySelectorAll('div')].find((element) => element.textContent?.includes('React') && element.textContent.includes('Forward'))!
+    expect(actions.className).toContain('text-slate-700')
+    await click([...actions.querySelectorAll('button')].find((button) => button.textContent === 'React') ?? null)
+    expect(host.querySelector('[aria-label="Choose a reaction"]')?.className).toContain('bg-white text-slate-900')
+    await click([...actions.querySelectorAll('button')].find((button) => button.textContent === 'Forward') ?? null)
+    expect(host.querySelector('[aria-label="Forward to conversation"]')?.className).toContain('bg-white')
+    expect([...outgoingBubble.querySelectorAll('button')].find((button) => button.textContent === 'Send')?.className).toContain('text-slate-900')
+  })
+
   it('provides Reply Privately from another member’s group message', async () => {
     await renderPage()
     await click(host.querySelector('[aria-label="More conversation options"]'))
