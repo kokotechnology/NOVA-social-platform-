@@ -35,6 +35,7 @@ export const sidebarItems = [
   { label: 'Videos', path: '/videos', icon: Video },
   { label: 'Calls', path: '/calls', icon: Phone },
   { label: 'Groups', path: '/communities', icon: UsersRound },
+  { label: 'Discussion Groups', path: '/discussion-groups', icon: UsersRound },
   { label: 'Live', path: '/live', icon: Radio },
   { label: 'Notifications', path: '/notifications', icon: Bell },
   { label: 'Profile', path: '/profile', icon: UserRound },
@@ -190,6 +191,7 @@ function TopBar({ currentPath }: TopBarProps) {
     '/calls': 'Calls',
     '/ai': 'AI Studio',
     '/communities': 'Communities',
+    '/discussion-groups': 'Discussion Groups',
     '/profile': 'Profile',
     '/settings': 'Settings',
     '/creator/monetization': 'Creator earnings',
@@ -203,7 +205,7 @@ function TopBar({ currentPath }: TopBarProps) {
     <header className="sticky top-0 z-20 flex items-center justify-between border-b border-blue-100 bg-white/95 px-4 py-3 backdrop-blur sm:px-6">
       <div>
         <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-blue-700">novachat</p>
-        <h1 className="text-xl font-semibold text-slate-900">{labels[currentPath] ?? (currentPath.startsWith('/profile/') ? 'Profile' : 'novachat')}</h1>
+        <h1 className="text-xl font-semibold text-slate-900">{labels[currentPath] ?? (currentPath.startsWith('/discussion-groups/') ? 'Discussion Groups' : currentPath.startsWith('/profile/') ? 'Profile' : 'novachat')}</h1>
       </div>
       <div className="flex items-center gap-2">
         <Link to="/explore" className="hidden rounded-xl border border-blue-100 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-blue-50 sm:inline-flex">Find people</Link>

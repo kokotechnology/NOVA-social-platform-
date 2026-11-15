@@ -177,6 +177,16 @@ async function canReadAttachment(key: string, ownerUserId: string, viewerId: str
     );
     if (referencedByMessage) return true;
     if (!videoMediaKeyFromUrl(mediaUrl) && !imageFileMediaKeyFromUrl(mediaUrl) && !audioMediaKeyFromUrl(mediaUrl)) return false;
+    const referencedByDiscussionGroup = socialStore.state.discussionPostMedia.some((media) =>
+      media.mediaUrl === mediaUrl
+      && socialStore.state.discussionPosts.some((post) => post.id === media.postId && post.status === 'APPROVED'
+        && socialStore.state.discussionGroups.some((group) => group.id === post.groupId
+          && (group.privacy === 'PUBLIC' && group.visibility === 'VISIBLE'
+            || socialStore.state.discussionMemberships.some((membership) => membership.groupId === group.id && membership.userId === viewerId))
+          && !socialStore.state.discussionBans.some((ban) => ban.groupId === group.id && ban.userId === viewerId
+            && (!ban.expiresAt || new Date(ban.expiresAt).getTime() > Date.now())))),
+    );
+    if (referencedByDiscussionGroup) return true;
     const isBlocked = socialStore.state.blocks.some((block) =>
       (block.blockerId === viewerId && block.blockedId === ownerUserId)
       || (block.blockerId === ownerUserId && block.blockedId === viewerId),
@@ -207,6 +217,23 @@ async function canReadAttachment(key: string, ownerUserId: string, viewerId: str
   });
   if (message) return true;
   if (!videoMediaKeyFromUrl(mediaUrl) && !imageFileMediaKeyFromUrl(mediaUrl) && !audioMediaKeyFromUrl(mediaUrl)) return false;
+  const discussionMedia = await prisma.discussionGroupPostMedia.findFirst({
+    where: {
+      mediaUrl,
+      post: {
+        status: 'APPROVED',
+        group: {
+          OR: [
+            { privacy: 'PUBLIC', visibility: 'VISIBLE' },
+            { memberships: { some: { userId: viewerId } } },
+          ],
+          NOT: { bans: { some: { userId: viewerId, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] } } },
+        },
+      },
+    },
+    select: { id: true },
+  });
+  if (discussionMedia) return true;
   const [blocked, follow, post] = await Promise.all([
     prisma.block.findFirst({
       where: { OR: [{ blockerId: viewerId, blockedId: ownerUserId }, { blockerId: ownerUserId, blockedId: viewerId }] },
@@ -275,7 +302,14 @@ async function canReadUploadedMedia(key: string, ownerUserId: string, viewerId: 
         && !participant.leftAt,
       ),
     );
-    return Boolean(referencedByProfile || referencedByPost || referencedByStory || referencedByMessage || referencedByConversation);
+    const referencedByDiscussionGroup = socialStore.state.discussionGroups.some((group) =>
+      (group.avatarUrl === mediaUrl || group.coverUrl === mediaUrl)
+      && (group.privacy === 'PUBLIC' && group.visibility === 'VISIBLE'
+        || socialStore.state.discussionMemberships.some((membership) => membership.groupId === group.id && membership.userId === viewerId))
+      && !socialStore.state.discussionBans.some((ban) => ban.groupId === group.id && ban.userId === viewerId
+        && (!ban.expiresAt || new Date(ban.expiresAt).getTime() > Date.now())),
+    );
+    return Boolean(referencedByProfile || referencedByPost || referencedByStory || referencedByMessage || referencedByConversation || referencedByDiscussionGroup);
   }
 
   const blocked = await prisma.block.findFirst({
@@ -294,6 +328,20 @@ async function canReadUploadedMedia(key: string, ownerUserId: string, viewerId: 
     select: { id: true },
   });
   if (profile) return true;
+  const discussionGroup = await prisma.discussionGroup.findFirst({
+    where: {
+      AND: [
+        { OR: [{ avatarUrl: mediaUrl }, { coverUrl: mediaUrl }] },
+        { OR: [
+          { privacy: 'PUBLIC', visibility: 'VISIBLE' },
+          { memberships: { some: { userId: viewerId } } },
+        ] },
+        { NOT: { bans: { some: { userId: viewerId, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] } } } },
+      ],
+    },
+    select: { id: true },
+  });
+  if (discussionGroup) return true;
 
   const [follow, posts, stories, message, conversation] = await Promise.all([
     prisma.follow.findUnique({

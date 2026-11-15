@@ -84,6 +84,52 @@ export type CommunityMemberRecord = {
   joinedAt: string;
 };
 
+export type DiscussionGroupStoreRecord = {
+  id: string;
+  ownerId: string;
+  name: string;
+  description: string;
+  category: string;
+  avatarUrl: string | null;
+  coverUrl: string | null;
+  privacy: 'PUBLIC' | 'PRIVATE';
+  visibility: 'VISIBLE' | 'HIDDEN';
+  membershipApproval: boolean;
+  postApproval: boolean;
+  rules: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DiscussionGroupMembershipStoreRecord = {
+  id: string;
+  groupId: string;
+  userId: string;
+  role: 'OWNER' | 'ADMIN' | 'MODERATOR' | 'MEMBER';
+  joinedAt: string;
+  postingRestrictedUntil: string | null;
+  suspendedUntil: string | null;
+};
+
+export type DiscussionGroupRequestStoreRecord = {
+  id: string;
+  groupId: string;
+  userId: string;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DiscussionGroupInvitationStoreRecord = {
+  id: string;
+  groupId: string;
+  inviterId: string;
+  inviteeId: string;
+  status: 'PENDING' | 'ACCEPTED' | 'REJECTED';
+  createdAt: string;
+  respondedAt: string | null;
+};
+
 export type SocialCommentRecord = {
   id: string;
   postId: string;
@@ -293,6 +339,21 @@ const globalStore = globalThis as typeof globalThis & {
     messageReactions: MessageReactionRecord[];
     communities: CommunityRecord[];
     communityMembers: CommunityMemberRecord[];
+    discussionGroups: DiscussionGroupStoreRecord[];
+    discussionMemberships: DiscussionGroupMembershipStoreRecord[];
+    discussionRequests: DiscussionGroupRequestStoreRecord[];
+    discussionInvitations: DiscussionGroupInvitationStoreRecord[];
+    discussionPosts: Array<Record<string, any>>;
+    discussionPostMedia: Array<Record<string, any>>;
+    discussionComments: Array<Record<string, any>>;
+    discussionPostReactions: Array<Record<string, any>>;
+    discussionCommentReactions: Array<Record<string, any>>;
+    discussionPolls: Array<Record<string, any>>;
+    discussionPollOptions: Array<Record<string, any>>;
+    discussionPollVotes: Array<Record<string, any>>;
+    discussionBans: Array<Record<string, any>>;
+    discussionReports: Array<Record<string, any>>;
+    discussionActions: Array<Record<string, any>>;
     subscriptionPlans: SubscriptionPlanRecord[];
     subscriptions: SubscriptionRecord[];
     payments: PaymentRecord[];
@@ -326,6 +387,21 @@ if (!globalStore.__novaSocialStore) {
     messageReactions: [],
     communities: [],
     communityMembers: [],
+    discussionGroups: [],
+    discussionMemberships: [],
+    discussionRequests: [],
+    discussionInvitations: [],
+    discussionPosts: [],
+    discussionPostMedia: [],
+    discussionComments: [],
+    discussionPostReactions: [],
+    discussionCommentReactions: [],
+    discussionPolls: [],
+    discussionPollOptions: [],
+    discussionPollVotes: [],
+    discussionBans: [],
+    discussionReports: [],
+    discussionActions: [],
     subscriptionPlans: [],
     subscriptions: [],
     payments: [],
@@ -369,6 +445,21 @@ export const socialStore = {
       messageReactions: [],
       communities: [],
       communityMembers: [],
+      discussionGroups: [],
+      discussionMemberships: [],
+      discussionRequests: [],
+      discussionInvitations: [],
+      discussionPosts: [],
+      discussionPostMedia: [],
+      discussionComments: [],
+      discussionPostReactions: [],
+      discussionCommentReactions: [],
+      discussionPolls: [],
+      discussionPollOptions: [],
+      discussionPollVotes: [],
+      discussionBans: [],
+      discussionReports: [],
+      discussionActions: [],
       subscriptionPlans: [],
       subscriptions: [],
       payments: [],

@@ -6,6 +6,7 @@ import { AppShell } from './components/AppShell'
 import { IncomingCallManager } from './components/IncomingCallManager'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { CommunitiesPage } from './pages/CommunitiesPage'
+import { DiscussionGroupsPage } from './pages/DiscussionGroupsPage'
 import { ExplorePage } from './pages/ExplorePage'
 import { HomePage } from './pages/HomePage'
 import { MessagesPage } from './pages/MessagesPage'
@@ -153,6 +154,8 @@ function AppRoutes() {
         <Route path="/calls" element={null} />
         <Route path="/ai" element={<AppShell><AiPage /></AppShell>} />
         <Route path="/communities" element={<AppShell><CommunitiesPage /></AppShell>} />
+        <Route path="/discussion-groups" element={<AppShell><DiscussionGroupsPage /></AppShell>} />
+        <Route path="/discussion-groups/:groupId" element={<AppShell><DiscussionGroupsPage /></AppShell>} />
         <Route path="/profile" element={<AppShell><ProfilePage /></AppShell>} />
         <Route path="/profile/:id" element={<AppShell><ProfilePage /></AppShell>} />
         <Route path="/settings" element={<AppShell><SettingsPage /></AppShell>} />

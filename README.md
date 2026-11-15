@@ -35,6 +35,12 @@ See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rule
 
 Group conversations created from the Messages page are persisted with an explicit group flag. Owners and moderators can add directory members from the group header; direct one-to-one conversations cannot be expanded this way. Message delivery/read receipts are persisted per recipient; read timestamps are only shared when that recipient has read receipts enabled. Unread markers, presence privacy, and last-seen timestamps are persisted per user. “My contacts” means people in a direct one-to-one NOVACHAT conversation; per-contact exceptions are not currently supported.
 
+## Discussion Groups
+
+Discussion Groups are a separate feature from Messages group conversations and Communities. They have their own PostgreSQL models, membership and moderation permissions, group feed, media, comments, reactions, and polls. Group feed and attachment reads enforce group visibility and membership on the API. New environments must apply the additive Prisma migration with `npm run db:migrate:deploy` from `server/` before deploying the API.
+
+Members can mention other group members, share posts from visible public groups into another group they have joined, edit posts and comments, page through threaded discussions, and see who reacted. Group moderators can pin and feature approved posts. Shared posts reference their source and only include its preview while the source remains visible and public; private and hidden group media is restricted to current members, and active bans revoke access.
+
 **NOVACHAT is not end-to-end encrypted.** Messages and attachments are transmitted over the configured HTTPS/API and stored as ordinary message content in PostgreSQL/media storage. The server can read message text and metadata; the application does not implement sender/recipient key agreement, device key storage, ciphertext-only message persistence, or client-side decryption. This is not equivalent to E2EE, and the UI must not claim that it is. A real E2EE rollout requires a separately designed and reviewed protocol, identity/device-key verification and recovery, multi-device/group key distribution, encrypted attachment handling, and a compatible migration strategy for existing plaintext messages. No partial encryption is applied.
 
 GIF and sticker search uses the GIPHY API from the server. Set `GIPHY_API_KEY` in the API deployment environment; the key is never sent to the browser. The picker reports an explicit configuration error if this credential is missing.
