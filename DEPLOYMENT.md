@@ -26,7 +26,7 @@ Use the existing Vercel project and configure it to deploy the repository's `mai
 
 ## Render
 
-Use the existing Render API service; do not create a second service. The API is a Docker service with `server/` as its root directory and `Dockerfile` as its Dockerfile path. Render Free does not provide a Pre-Deploy Command, so the Docker build runs `npm run db:migrate:deploy` once in its build stage before the new image can start. Keep the Render `DATABASE_URL` environment variable set to the pooled Neon connection for application runtime. In the Render service's **Secret Files**, create a separate file named `migration_database_url` containing Neon's direct (non-pooled) PostgreSQL connection string; do not copy the pooled `DATABASE_URL` into this file. The Dockerfile mounts this file as a BuildKit secret only for the migration command, and `server/.dockerignore` keeps it out of the image. Remove the old `database_url` Secret File if present. The build fails and the currently deployed API remains in service if migration fails. Prisma's PostgreSQL advisory lock serializes migration runners; do not disable it. The build keys the migration step to `RENDER_GIT_COMMIT` so BuildKit does not reuse a prior commit's migration layer. Container startup only runs `npm start`, so migrations do not run on application restarts. The server listens on `0.0.0.0` and uses Render's `PORT` when provided.
+Use the existing Render API service; do not create a second service. The API is a Docker service with `server/` as its root directory and `Dockerfile` as its Dockerfile path. Render Free does not provide a Pre-Deploy Command, and its Secret Files are available to the running service at `/etc/secrets/<filename>`, not during the Docker image build. Keep the existing runtime `DATABASE_URL` and both existing Secret Files (`database_url` and `migration_database_url`) unchanged. On each production container start, `npm start` reads `/etc/secrets/migration_database_url` and runs `npx prisma migrate deploy` before importing the application server; only that Prisma child process receives the migration URL as `DATABASE_URL`. If the file cannot be read or any migration fails, startup aborts with a sanitized error and the server does not listen. Prisma's PostgreSQL advisory lock serializes migration runners; do not disable it. The server listens on `0.0.0.0` and uses Render's `PORT` when provided.
 
 Configure the Render service environment with the required variable names listed below and in `server/.env.example`. Set `CORS_ORIGIN` to the exact HTTPS Vercel production origin(s), comma-separated if there is more than one. The API also explicitly permits the known Vercel production hostnames in `server/src/app.ts`. Store database URLs and signing keys only in Render's environment settings, never in this repository.
 
@@ -55,7 +55,7 @@ npm run db:migrate:deploy
 npm run db:migrate:status
 ```
 
-`db:migrate:deploy` applies committed migrations without resetting data. On Render, the Docker image build runs it as a BuildKit-secret-backed build step, not during each container startup. The Render `migration_database_url` Secret File must contain Neon's direct (non-pooled) connection; the runtime `DATABASE_URL` can remain pooled. Do not use `db:push` or `migrate dev` against production.
+`db:migrate:deploy` applies committed migrations without resetting data. On Render, production container startup runs it before the backend begins accepting requests, using the existing `/etc/secrets/migration_database_url` Secret File. The runtime `DATABASE_URL` is preserved and is not replaced by the migration connection. Do not use `db:push` or `migrate dev` against production.
 
 For the NOVACHAT account-appeal and moderation changes, the latest migrations are ordered as:
 
@@ -76,7 +76,7 @@ These are additive, forward-only Prisma migrations. Take a database backup and e
 ## Manual Render and Vercel release sequence
 
 1. Confirm the intended commit is on `main` and that the Render and Vercel projects are connected to this repository. Back up PostgreSQL before a schema-changing release.
-2. Deploy that commit to the existing Render API service first. The Docker build runs `npm run db:migrate:deploy` before Render can start the new image. Check Render build logs for migration completion and verify `https://nova-social-platform-api.onrender.com/api/health` reports `status: ok` and `database: ok`. If the service does not auto-deploy, select the intended commit in Render's dashboard and trigger a manual deploy. Do not run `db:push` or `migrate dev`.
+2. Deploy that commit to the existing Render API service first. The production container runs `npx prisma migrate deploy` before starting the API. Check Render runtime logs for the `database_migrations_completed` event and verify `https://nova-social-platform-api.onrender.com/api/health` reports `status: ok` and `database: ok`. If the service does not auto-deploy, select the intended commit in Render's dashboard and trigger a manual deploy. Do not run `db:push` or `migrate dev`.
 3. After the API and database health checks pass, deploy the same commit to the existing Vercel frontend project using the repository root, `npm ci`, `npm run build`, and `dist`. Do not set `VITE_API_BASE_URL` for production; the checked-in Vercel rewrite forwards API requests to Render.
 4. Verify the frontend at `https://nova-social-platform.vercel.app/`, then test authentication, account appeals/moderation, messaging, and media using non-production test accounts/data where appropriate. Do not change production credentials as part of the deploy.
 
@@ -92,7 +92,7 @@ npm --prefix server run build
 npm --prefix server start
 ```
 
-`npm --prefix server run build` never applies migrations. Run `npm --prefix server run db:migrate:deploy` against the intended database as a deployment/release step, then verify it with `npm --prefix server run db:migrate:status`. The production Docker container does not run migrations at startup; its Render image build runs them once before the image starts, using the `migration_database_url` BuildKit secret file described above.
+`npm --prefix server run build` never applies migrations. The production Docker container runs `npx prisma migrate deploy` at startup before importing the API server, using the existing `/etc/secrets/migration_database_url` Secret File. For manual deployment checks, `npm --prefix server run db:migrate:deploy` applies committed migrations without resetting data; verify the result with `npm --prefix server run db:migrate:status`.
 
 Frontend:
 
