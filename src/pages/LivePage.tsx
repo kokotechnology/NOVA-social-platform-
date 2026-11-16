@@ -10,6 +10,7 @@ import { openAuthenticatedEventStream } from '../lib/eventStream'
 import { finalizeLiveRecording } from '../lib/liveRecording'
 import { deletePendingLiveRecording, getPendingLiveRecordings, savePendingLiveRecording, type PendingLiveRecording } from '../lib/liveRecordingStore'
 import { cameraSwitchErrorMessage, switchToNextCamera } from '../lib/cameraSwitching'
+import { acquireMicrophone, microphoneAccessErrorMessage } from '../lib/microphoneAccess'
 
 type LiveComment = { id: string; userId: string; text: string; createdAt: string }
 type LiveSession = {
@@ -102,6 +103,10 @@ export function LivePage() {
   const hostRoomRef = useRef<Room | null>(null)
   const previewVideoRef = useRef<HTMLVideoElement | null>(null)
   const previewBackdropRef = useRef<HTMLVideoElement | null>(null)
+  const previewLeaseRef = useRef<(() => void) | null>(null)
+  const previewRequestIdRef = useRef(0)
+  const previewStreamRef = useRef<MediaStream | null>(null)
+  const microphoneLeasesRef = useRef(new WeakMap<Room, () => void>())
   const joinedLiveRef = useRef<LiveSession | null>(null)
   const livesRef = useRef<LiveSession[]>([])
   const intentionalDisconnectRef = useRef(new WeakSet<Room>())
@@ -116,6 +121,20 @@ export function LivePage() {
   const endInFlightRef = useRef(false)
   const attemptedNotificationLiveRef = useRef('')
   const replayActionInFlightRef = useRef(false)
+
+  const releaseRoomMicrophone = useCallback((room: Room) => {
+    const release = microphoneLeasesRef.current.get(room)
+    microphoneLeasesRef.current.delete(room)
+    release?.()
+  }, [])
+
+  useEffect(() => () => {
+    previewRequestIdRef.current += 1
+    previewStreamRef.current?.getTracks().forEach((track) => track.stop())
+    previewStreamRef.current = null
+    previewLeaseRef.current?.()
+    previewLeaseRef.current = null
+  }, [])
 
   useEffect(() => {
     if (!userId) {
@@ -380,12 +399,14 @@ export function LivePage() {
       await room.disconnect(true)
     } catch (disconnectError) {
       cleanupErrors.push(disconnectError)
+    } finally {
+      releaseRoomMicrophone(room)
     }
     await recordingPromise
     if (cleanupErrors.length) {
       throw new Error(cleanupErrors.map((failure) => failure instanceof Error ? failure.message : String(failure)).join(' '))
     }
-  }, [finalizeAndPublishRecording, userId])
+  }, [finalizeAndPublishRecording, releaseRoomMicrophone, userId])
 
   const refreshLives = () => {
     setLoading(true)
@@ -453,6 +474,8 @@ export function LivePage() {
       hostRoomRef.current = null
       setGuestRoom(null)
       void room.disconnect(true)
+        .catch((disconnectError: unknown) => console.error('Unable to close the live room while leaving the Live page.', disconnectError))
+        .finally(() => releaseRoomMicrophone(room))
       const cleanupPath = hostLive
         ? `/api/live/${encodeURIComponent(hostLive.id)}/end`
         : viewerLive
@@ -471,7 +494,7 @@ export function LivePage() {
           .catch((cleanupError: unknown) => console.error('Unable to close live media while leaving the live page.', cleanupError))
       }
     }
-  }, [finalizeAndPublishRecording, user?.id])
+  }, [finalizeAndPublishRecording, releaseRoomMicrophone, user?.id])
 
   const createLive = async (event: FormEvent) => {
     event.preventDefault()
@@ -495,26 +518,49 @@ export function LivePage() {
 
   const previewBroadcast = async (live: LiveSession) => {
     if (!navigator.mediaDevices?.getUserMedia) {
-      setError('This browser does not support camera and microphone preview.')
+      setError(window.isSecureContext === false
+        ? 'Camera and microphone access requires a secure connection. Open NOVACHAT using HTTPS or the installed app, then try again.'
+        : 'This browser does not support camera and microphone preview.')
       return
     }
     setError('')
+    let releaseMicrophone: (() => void) | null = null
+    let requestId = 0
     try {
+      releaseMicrophone = acquireMicrophone()
+      previewLeaseRef.current = releaseMicrophone
+      requestId = ++previewRequestIdRef.current
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: true,
         video: { width: { ideal: 1280 }, height: { ideal: 720 } },
       })
+      if (requestId !== previewRequestIdRef.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        releaseMicrophone()
+        if (previewLeaseRef.current === releaseMicrophone) previewLeaseRef.current = null
+        return
+      }
+      previewStreamRef.current = stream
       setPreviewLive(live)
       setPreviewStream(stream)
     } catch (previewError) {
-      setError(previewError instanceof Error && ['NotAllowedError', 'SecurityError'].includes(previewError.name)
-        ? 'Camera or microphone permission was denied. Allow both permissions, then try previewing again.'
-        : previewError instanceof Error ? previewError.message : 'Unable to start camera preview.')
+      if (requestId && requestId !== previewRequestIdRef.current) {
+        releaseMicrophone?.()
+        if (previewLeaseRef.current === releaseMicrophone) previewLeaseRef.current = null
+        return
+      }
+      releaseMicrophone?.()
+      if (previewLeaseRef.current === releaseMicrophone) previewLeaseRef.current = null
+      setError(microphoneAccessErrorMessage(previewError, undefined, 'camera and microphone'))
     }
   }
 
   const cancelPreview = () => {
-    previewStream?.getTracks().forEach((track) => track.stop())
+    previewRequestIdRef.current += 1
+    previewStreamRef.current?.getTracks().forEach((track) => track.stop())
+    previewStreamRef.current = null
+    previewLeaseRef.current?.()
+    previewLeaseRef.current = null
     setPreviewStream(null)
     setPreviewLive(null)
   }
@@ -533,6 +579,7 @@ export function LivePage() {
       room.on(RoomEvent.Reconnecting, () => setError('LiveKit connection interrupted; attempting to reconnect…'))
       room.on(RoomEvent.Reconnected, () => setError(''))
       room.on(RoomEvent.Disconnected, () => {
+        if (room) releaseRoomMicrophone(room)
         if (roomRef.current !== room) return
         const wasHost = hostRoomRef.current === room
         roomRef.current = null
@@ -566,9 +613,17 @@ export function LivePage() {
         }
       })
       await room.connect(url, token)
-      await room.localParticipant.setMicrophoneEnabled(true)
-      await room.localParticipant.setCameraEnabled(true, { resolution: { width: 1280, height: 720 } })
-      if (!room.localParticipant.getTrackPublication(cameraTrackSource)?.track || !room.localParticipant.getTrackPublication(microphoneTrackSource)?.track) {
+      if (!room) throw new Error('The live broadcast room could not be opened.')
+      const connectedRoom = room
+      const releaseMicrophone = acquireMicrophone()
+      microphoneLeasesRef.current.set(connectedRoom, releaseMicrophone)
+      try {
+        await connectedRoom.localParticipant.setMicrophoneEnabled(true)
+        await connectedRoom.localParticipant.setCameraEnabled(true, { resolution: { width: 1280, height: 720 } })
+      } catch (mediaError) {
+        throw new Error(microphoneAccessErrorMessage(mediaError, undefined, 'camera and microphone'))
+      }
+      if (!connectedRoom.localParticipant.getTrackPublication(cameraTrackSource)?.track || !connectedRoom.localParticipant.getTrackPublication(microphoneTrackSource)?.track) {
         throw new Error('LiveKit did not publish the camera and microphone. The broadcast has not started.')
       }
       const response = await apiRequest<{ live: LiveSession; notificationWarning?: boolean }>(`/api/live/${encodeURIComponent(live.id)}/start`, { method: 'POST' })
@@ -836,6 +891,7 @@ export function LivePage() {
       room.on(RoomEvent.Reconnecting, () => setError('LiveKit connection interrupted; attempting to reconnect…'))
       room.on(RoomEvent.Reconnected, () => setError(''))
       room.on(RoomEvent.Disconnected, () => {
+        if (room) releaseRoomMicrophone(room)
         if (roomRef.current !== room) return
         roomRef.current = null
         setGuestRoom(null)
@@ -858,8 +914,16 @@ export function LivePage() {
       const heartbeat = await apiRequest<{ live: LiveSession }>(`/api/live/${encodeURIComponent(live.id)}/viewers/heartbeat`, { method: 'POST' })
       setLiveState(heartbeat.live)
       if (admittedGuest && publishAsGuest) {
-        await room.localParticipant.setMicrophoneEnabled(true)
-        await room.localParticipant.setCameraEnabled(true)
+        if (!room) throw new Error('The live stage room could not be opened.')
+        const connectedRoom = room
+        const releaseMicrophone = acquireMicrophone()
+        microphoneLeasesRef.current.set(connectedRoom, releaseMicrophone)
+        try {
+          await connectedRoom.localParticipant.setMicrophoneEnabled(true)
+          await connectedRoom.localParticipant.setCameraEnabled(true)
+        } catch (mediaError) {
+          throw new Error(microphoneAccessErrorMessage(mediaError, undefined, 'camera and microphone'))
+        }
         setGuestRoom(room)
         setHostMuted(false)
         setHostCameraOn(true)

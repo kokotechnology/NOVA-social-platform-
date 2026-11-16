@@ -31,6 +31,8 @@ import { MessagesPage } from '../src/pages/MessagesPage'
 let root: Root | null = null
 let host: HTMLDivElement
 let activeRecorder: MockMediaRecorder | null = null
+let activeMicrophoneTrack: { stop: ReturnType<typeof vi.fn>; addEventListener: ReturnType<typeof vi.fn> } | null = null
+let getUserMediaMock: ReturnType<typeof vi.fn>
 
 class MockMediaRecorder {
   static isTypeSupported() { return true }
@@ -126,8 +128,13 @@ describe('WhatsApp-style voice recording', () => {
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     activeRecorder = null
+    activeMicrophoneTrack = { stop: vi.fn(), addEventListener: vi.fn() }
+    getUserMediaMock = vi.fn().mockResolvedValue({
+      getTracks: () => [activeMicrophoneTrack],
+      getAudioTracks: () => [activeMicrophoneTrack],
+    })
     Object.defineProperty(window, 'matchMedia', { configurable: true, value: vi.fn(() => ({ matches: true, addListener: vi.fn(), removeListener: vi.fn() })) })
-    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [{ stop: vi.fn() }], getAudioTracks: () => [{ stop: vi.fn(), addEventListener: vi.fn() }] }) } })
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: getUserMediaMock } })
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:voice') })
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
     vi.stubGlobal('MediaRecorder', MockMediaRecorder)
@@ -149,11 +156,22 @@ describe('WhatsApp-style voice recording', () => {
     expect(activeRecorder?.state).toBe('recording')
     await pointer(button, 'pointerup', 120, 240)
 
+    expect(activeRecorder?.state).toBe('inactive')
+    expect(activeMicrophoneTrack?.stop).toHaveBeenCalledOnce()
     expect(voiceTestState.uploadMessageAttachment).toHaveBeenCalledOnce()
     expect(voiceTestState.apiRequest).toHaveBeenCalledWith('/api/conversations/chat-1/messages', expect.objectContaining({
       method: 'POST',
       body: JSON.stringify({ contentType: 'VOICE', mediaUrl: '/api/attachments/voice' }),
     }))
+  })
+
+  it('does not request microphone permission twice while the first request is pending', async () => {
+    getUserMediaMock.mockImplementation(() => new Promise(() => {}))
+    await renderPage()
+    const button = await startHolding()
+    await pointer(button, 'pointerdown', 120, 240)
+
+    expect(getUserMediaMock).toHaveBeenCalledOnce()
   })
 
   it('locks on upward slide and offers explicit send and cancel controls', async () => {
@@ -190,6 +208,34 @@ describe('WhatsApp-style voice recording', () => {
     await click(host.querySelector('[aria-label="Send message"]'))
     expect(voiceTestState.uploadMessageAttachment).toHaveBeenCalledTimes(2)
     expect(voiceTestState.apiRequest).toHaveBeenCalledWith('/api/conversations/chat-1/messages', expect.objectContaining({ method: 'POST' }))
+  })
+
+  it('explains how to restore a denied microphone permission', async () => {
+    const denied = Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' })
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: vi.fn().mockRejectedValue(denied) },
+    })
+    await renderPage()
+
+    await startHolding()
+
+    expect(host.textContent).toContain('Microphone permission was denied.')
+    expect(host.textContent).toContain('browser’s site settings')
+  })
+
+  it('reports an unavailable microphone separately from permission denial', async () => {
+    const missing = Object.assign(new Error('Requested device not found'), { name: 'NotFoundError' })
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: vi.fn().mockRejectedValue(missing) },
+    })
+    await renderPage()
+
+    await startHolding()
+
+    expect(host.textContent).toContain('No microphone was found')
+    expect(host.textContent).not.toContain('permission was denied')
   })
 
   it('exposes disappearing-message settings in the conversation menu', async () => {

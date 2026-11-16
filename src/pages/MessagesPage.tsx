@@ -10,6 +10,7 @@ import { openAuthenticatedEventStream } from '../lib/eventStream'
 import { updateConversationPreviewFromMessage, upsertMessageById } from '../lib/messageList'
 import { formatRecordingDuration, getVoiceRecordingGesture, type PointerPosition } from '../lib/voiceRecordingGesture'
 import { isVideoStoryMedia } from '../lib/storyReplies'
+import { acquireMicrophone, microphoneAccessErrorMessage } from '../lib/microphoneAccess'
 
 type ConversationParticipant = { userId: string; role?: string; user?: { id: string; name: string; avatar?: string } }
 type ConversationListItem = {
@@ -199,6 +200,8 @@ export function MessagesPage() {
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const recordingStreamRef = useRef<MediaStream | null>(null)
+  const microphoneLeaseRef = useRef<(() => void) | null>(null)
+  const recordingRequestIdRef = useRef(0)
   const recordingIntentRef = useRef<'send' | 'cancel'>('send')
   const recordingPendingActionRef = useRef<'send' | 'cancel' | null>(null)
   const recordingConversationRef = useRef('')
@@ -256,6 +259,7 @@ export function MessagesPage() {
   }
 
   useEffect(() => () => {
+    recordingRequestIdRef.current += 1
     recordingIntentRef.current = 'cancel'
     if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
     if (recordingPresenceTimerRef.current) clearInterval(recordingPresenceTimerRef.current)
@@ -264,6 +268,8 @@ export function MessagesPage() {
       recorderRef.current.stop()
     }
     recordingStreamRef.current?.getTracks().forEach((track) => track.stop())
+    microphoneLeaseRef.current?.()
+    microphoneLeaseRef.current = null
     if (mediaPreviewUrlRef.current) URL.revokeObjectURL(mediaPreviewUrlRef.current)
   }, [])
 
@@ -799,11 +805,17 @@ export function MessagesPage() {
 
   const startVoiceRecording = async () => {
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      setError('Voice recording is not supported by this browser.')
+      setError(window.isSecureContext === false
+        ? 'Voice recording requires a secure connection. Open NOVACHAT using HTTPS or the installed app, then try again.'
+        : 'Voice recording is not supported by this browser.')
       return
     }
-    if (recorderRef.current && recorderRef.current.state !== 'inactive') return
+    if (microphoneLeaseRef.current || (recorderRef.current && recorderRef.current.state !== 'inactive')) return
+    let requestId = 0
     try {
+      const releaseMicrophone = acquireMicrophone()
+      microphoneLeaseRef.current = releaseMicrophone
+      requestId = ++recordingRequestIdRef.current
       setError('')
       setComposeType('VOICE')
       setVoiceCancelled(false)
@@ -814,9 +826,17 @@ export function MessagesPage() {
       recordingPendingActionRef.current = null
       recordingConversationRef.current = selectedId
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (requestId !== recordingRequestIdRef.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        releaseMicrophone()
+        if (microphoneLeaseRef.current === releaseMicrophone) microphoneLeaseRef.current = null
+        return
+      }
       if (recordingPendingActionRef.current || selectedIdRef.current !== recordingConversationRef.current) {
         const endedBeforeReady = recordingPendingActionRef.current === 'send'
         stream.getTracks().forEach((track) => track.stop())
+        releaseMicrophone()
+        if (microphoneLeaseRef.current === releaseMicrophone) microphoneLeaseRef.current = null
         recordingPendingActionRef.current = null
         setComposeType('TEXT')
         setVoiceLocked(false)
@@ -824,6 +844,7 @@ export function MessagesPage() {
         return
       }
       recordingStreamRef.current = stream
+      const stopMicrophoneLease = releaseMicrophone
       const mimeType = ['audio/webm', 'audio/mp4', 'audio/ogg'].find((type) => MediaRecorder.isTypeSupported(type))
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
       const chunks: BlobPart[] = []
@@ -853,6 +874,8 @@ export function MessagesPage() {
           setComposeType('TEXT')
         }
         stream.getTracks().forEach((track) => track.stop())
+        stopMicrophoneLease()
+        if (microphoneLeaseRef.current === stopMicrophoneLease) microphoneLeaseRef.current = null
         recordingStreamRef.current = null
         recorderRef.current = null
         setRecording(false)
@@ -872,7 +895,6 @@ export function MessagesPage() {
           recorder.stop()
         }, { once: true })
       })
-      recordingStreamRef.current = stream
       recorderRef.current = recorder
       recorder.start()
       recordingStartedAtRef.current = Date.now()
@@ -885,11 +907,20 @@ export function MessagesPage() {
       const pendingAction = recordingPendingActionRef.current
       if (pendingAction) stopVoiceRecording(pendingAction === 'send')
     } catch (recordingError) {
+      if (requestId && requestId !== recordingRequestIdRef.current) {
+        const lease = microphoneLeaseRef.current
+        lease?.()
+        if (microphoneLeaseRef.current === lease) microphoneLeaseRef.current = null
+        return
+      }
       recordingPendingActionRef.current = null
       recordingStreamRef.current?.getTracks().forEach((track) => track.stop())
       recordingStreamRef.current = null
+      const lease = requestId ? microphoneLeaseRef.current : null
+      lease?.()
+      if (microphoneLeaseRef.current === lease) microphoneLeaseRef.current = null
       setComposeType('TEXT')
-      setError(recordingError instanceof Error ? `Microphone unavailable: ${recordingError.message}` : 'Microphone permission was denied.')
+      setError(microphoneAccessErrorMessage(recordingError))
     }
   }
 

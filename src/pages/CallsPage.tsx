@@ -11,6 +11,7 @@ import { openAuthenticatedEventStream } from '../lib/eventStream'
 import { callScreenState, callViewportClassName, formatCallDuration } from '../lib/callPresentation'
 import { retryCallConnectionConfirmation } from '../lib/callConnection'
 import { cameraSwitchErrorMessage, switchToNextCamera } from '../lib/cameraSwitching'
+import { acquireMicrophone, microphoneAccessErrorMessage } from '../lib/microphoneAccess'
 
 type CallParticipant = { userId: string; status: string; muted: boolean; cameraOn: boolean; speakerOn: boolean }
 type CallSession = {
@@ -80,8 +81,15 @@ export function CallsPage() {
   const callsRef = useRef<CallSession[]>([])
   const roomRef = useRef<Room | null>(null)
   const roomCallIdRef = useRef('')
+  const microphoneLeasesRef = useRef(new WeakMap<Room, () => void>())
   const intentionalDisconnectRef = useRef(new WeakSet<Room>())
   const confirmedCallsRef = useRef(new Set<string>())
+
+  const releaseRoomMicrophone = useCallback((room: Room) => {
+    const release = microphoneLeasesRef.current.get(room)
+    microphoneLeasesRef.current.delete(room)
+    release?.()
+  }, [])
 
   const replaceCall = useCallback((call: CallSession) => {
     callsRef.current = callsRef.current.some((item) => item.id === call.id)
@@ -102,8 +110,12 @@ export function CallsPage() {
     setActiveCallId('')
     setNeedsAudioPlayback(false)
     setNeedsVideoPlayback(false)
-    await room.disconnect(true)
-  }, [])
+    try {
+      await room.disconnect(true)
+    } finally {
+      releaseRoomMicrophone(room)
+    }
+  }, [releaseRoomMicrophone])
 
   const fetchCallData = useCallback(() => Promise.all([
     apiRequest<{ calls: CallSession[] }>('/api/calls/history'),
@@ -171,6 +183,7 @@ export function CallsPage() {
     room.on(RoomEvent.Reconnecting, () => setError('LiveKit connection interrupted; attempting to reconnect…'))
     room.on(RoomEvent.Reconnected, () => setError(''))
     room.on(RoomEvent.Disconnected, () => {
+      releaseRoomMicrophone(room)
       if (roomRef.current !== room) return
       roomRef.current = null
       roomCallIdRef.current = ''
@@ -192,8 +205,18 @@ export function CallsPage() {
 
     try {
       await room.connect(url, token)
-      await room.localParticipant.setMicrophoneEnabled(true)
-      if (call.type === 'video') await room.localParticipant.setCameraEnabled(true)
+      const releaseMicrophone = acquireMicrophone()
+      microphoneLeasesRef.current.set(room, releaseMicrophone)
+      try {
+        await room.localParticipant.setMicrophoneEnabled(true)
+        if (call.type === 'video') await room.localParticipant.setCameraEnabled(true)
+      } catch (mediaError) {
+        throw new Error(microphoneAccessErrorMessage(
+          mediaError,
+          undefined,
+          call.type === 'video' ? 'camera and microphone' : 'microphone',
+        ))
+      }
       localMediaReady = true
       confirmConnection()
       setMuted(false)
@@ -206,10 +229,14 @@ export function CallsPage() {
       intentionalDisconnectRef.current.add(room)
       if (roomRef.current === room) roomRef.current = null
       roomCallIdRef.current = ''
-      await room.disconnect(true)
+      try {
+        await room.disconnect(true)
+      } finally {
+        releaseRoomMicrophone(room)
+      }
       throw connectError
     }
-  }, [closeCallRoom, replaceCall])
+  }, [closeCallRoom, releaseRoomMicrophone, replaceCall])
 
   useEffect(() => {
     let cancelled = false
@@ -276,13 +303,15 @@ export function CallsPage() {
       roomRef.current = null
       roomCallIdRef.current = ''
       void room.disconnect(true)
+        .catch((disconnectError: unknown) => console.error('Unable to close the call room while leaving the calls page.', disconnectError))
+        .finally(() => releaseRoomMicrophone(room))
       if (callId) {
         const action = call && call.callerId === user?.id && call.status === 'ringing' ? 'cancel' : 'leave'
         void apiRequest(`/api/calls/${encodeURIComponent(callId)}/${action}`, { method: 'POST' })
           .catch((cleanupError: unknown) => console.error('Unable to leave the call while closing the calls page.', cleanupError))
       }
     }
-  }, [user?.id])
+  }, [releaseRoomMicrophone, user?.id])
 
   const filteredUsers = useMemo(() => users.filter((person) => `${person.name} ${person.handle}`.toLowerCase().includes(query.toLowerCase())), [users, query])
 

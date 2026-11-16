@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../src/lib/api'
+import { acquireMicrophone } from '../src/lib/microphoneAccess'
 
 const mocks = vi.hoisted(() => ({
   apiRequest: vi.fn(),
@@ -114,7 +115,7 @@ describe('LiveKit call connection flow', () => {
         if (type === 'video') expect(mocks.setCameraEnabled).toHaveBeenCalledWith(true)
         return { call: { ...call, status: 'connected' } }
       }
-      if (path === '/api/calls/call-1/leave') return { call: { ...call, status: 'ended' } }
+      if (path === '/api/calls/call-1/leave' || path === '/api/calls/call-1/end') return { call: { ...call, status: 'ended' } }
       throw new Error(`Unexpected API request: ${path}`)
     })
 
@@ -132,6 +133,16 @@ describe('LiveKit call connection flow', () => {
     expect(mocks.apiRequest).toHaveBeenCalledWith('/api/calls/call-1/connected', { method: 'POST' })
     expect(host.textContent).toContain('Connected ·')
     expect(host.textContent).not.toContain('Your LiveKit media has not connected')
+    expect(() => acquireMicrophone()).toThrow('already in use')
+
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>('[aria-label="End call"]')?.click()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    const releaseMicrophone = acquireMicrophone()
+    releaseMicrophone()
+    expect(mocks.roomDisconnect).toHaveBeenCalledWith(true)
   })
 
   it('does not retry the confirmation after leaving the room', async () => {
